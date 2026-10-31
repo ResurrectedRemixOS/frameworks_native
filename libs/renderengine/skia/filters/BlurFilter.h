@@ -18,8 +18,12 @@
 
 #include <SkCanvas.h>
 #include <SkImage.h>
+#include <SkRRect.h>
 #include <SkRuntimeEffect.h>
 #include <SkSurface.h>
+#include <ui/BlurRegion.h>
+
+#include <vector>
 
 #include "../compat/SkiaGpuContext.h"
 #include "RuntimeEffectManager.h"
@@ -66,6 +70,30 @@ public:
 
     float getMaxCrossFadeRadius() const;
 
+    // Catalyxx glass (BlurRegion::isGlass()): false if its effects failed to build, in which
+    // case glass regions are drawn as plain blur.
+    bool canDrawGlass() const { return mGlassEffect && mGlassShadowEffect; }
+
+    // The outline a glass region is drawn in: the region's rounded rect with square corners
+    // next to its joined sides, so neighbouring pieces meet without a gap.
+    static SkRRect getGlassRRect(const BlurRegion& region);
+
+    /**
+     * Draw one soft shadow around all the glass regions in the list, before any of them is
+     * drawn. Pieces that touch or overlap share one shadow.
+     */
+    void drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions);
+
+    /**
+     * Draw a glass region: its rim bends in the content just past the edge and catches the
+     * light, its middle shows the content behind it, clear or frosted.
+     * @param blurRect bounds of the blurredImage translated into canvas coordinates
+     * @param blurredImage down-sampled blurred content that was produced by the generate() method
+     * @param input original unblurred input, which the rim bends
+     */
+    void drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const SkRect& blurRect,
+                         sk_sp<SkImage> blurredImage, sk_sp<SkImage> input);
+
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {
         return true;
@@ -78,6 +106,11 @@ private:
 
     // Optional blend used for crossfade only if mMaxCrossFadeRadius > 0
     const sk_sp<SkRuntimeEffect> mMixEffect;
+
+    // Catalyxx glass. Built here rather than with the known effects, whose build failures
+    // are fatal: if these fail, glass falls back to plain blur.
+    sk_sp<SkRuntimeEffect> mGlassEffect;
+    sk_sp<SkRuntimeEffect> mGlassShadowEffect;
 };
 
 } // namespace skia

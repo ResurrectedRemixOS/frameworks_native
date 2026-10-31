@@ -989,7 +989,9 @@ void SkiaRenderEngine::drawLayersInternal(
                 requiresCompositionLayer = true;
             }
             for (auto region : layer.blurRegions) {
-                if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
+                // Catalyxx glass bends the sharp content too, like the crossfade.
+                if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
+                    (region.isGlass() && mBlurFilter->canDrawGlass())) {
                     requiresCompositionLayer = true;
                 }
             }
@@ -1123,7 +1125,8 @@ void SkiaRenderEngine::drawLayersInternal(
                         requiresCrossFadeWithBlurInput = true;
                     }
                     for (auto region : layer.blurRegions) {
-                        if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
+                        if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
+                            (region.isGlass() && mBlurFilter->canDrawGlass())) {
                             requiresCrossFadeWithBlurInput = true;
                         }
                     }
@@ -1157,6 +1160,9 @@ void SkiaRenderEngine::drawLayersInternal(
                     SkAutoCanvasRestore acr(canvas, true);
                     canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
 
+                    // Catalyxx glass: one shadow goes under all of the layer's glass.
+                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions);
+
                     // Clustering regions by blur radius allows regions with a shared blur radius to
                     // reuse the same result from generateTemporaryImage(...). The exact order does
                     // not matter. Initial sizes for ftl stack-first collections were chosen
@@ -1175,6 +1181,11 @@ void SkiaRenderEngine::drawLayersInternal(
                             [this, canvas, &blurRect,
                              &blurInput](const sk_sp<SkImage>& temporaryBlurredImage,
                                          const BlurRegion& region) {
+                                if (region.isGlass()) {
+                                    mBlurFilter->drawGlassRegion(canvas, region, blurRect,
+                                                                 temporaryBlurredImage, blurInput);
+                                    return;
+                                }
                                 mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
                                                             region.blurRadius, 1.0f, region.alpha,
                                                             blurRect, temporaryBlurredImage,
