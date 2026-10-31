@@ -208,6 +208,13 @@ status_t layer_state_t::write(Parcel& output) const
         SAFE_PARCEL(output.writeInt32, region.top);
         SAFE_PARCEL(output.writeInt32, region.right);
         SAFE_PARCEL(output.writeInt32, region.bottom);
+        SAFE_PARCEL(output.writeFloat, region.glassRimWidth);
+        SAFE_PARCEL(output.writeFloat, region.glassBend);
+        SAFE_PARCEL(output.writeFloat, region.glassFrost);
+        SAFE_PARCEL(output.writeFloat, region.glassRimLight);
+        SAFE_PARCEL(output.writeFloat, region.glassDispersion);
+        SAFE_PARCEL(output.writeFloat, region.glassShadow);
+        SAFE_PARCEL(output.writeUint32, region.glassJoinedSides);
     }
 
     SAFE_PARCEL(output.write, stretchEffect);
@@ -399,6 +406,13 @@ status_t layer_state_t::read(const Parcel& input)
         SAFE_PARCEL(input.readInt32, &region.top);
         SAFE_PARCEL(input.readInt32, &region.right);
         SAFE_PARCEL(input.readInt32, &region.bottom);
+        SAFE_PARCEL(input.readFloat, &region.glassRimWidth);
+        SAFE_PARCEL(input.readFloat, &region.glassBend);
+        SAFE_PARCEL(input.readFloat, &region.glassFrost);
+        SAFE_PARCEL(input.readFloat, &region.glassRimLight);
+        SAFE_PARCEL(input.readFloat, &region.glassDispersion);
+        SAFE_PARCEL(input.readFloat, &region.glassShadow);
+        SAFE_PARCEL(input.readUint32, &region.glassJoinedSides);
         blurRegions.push_back(region);
     }
 

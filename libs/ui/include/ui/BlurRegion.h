@@ -25,6 +25,12 @@
 namespace android {
 
 struct BlurRegion {
+    // Sides of a region, for glassJoinedSides.
+    static constexpr uint32_t kGlassSideLeft = 1 << 0;
+    static constexpr uint32_t kGlassSideTop = 1 << 1;
+    static constexpr uint32_t kGlassSideRight = 1 << 2;
+    static constexpr uint32_t kGlassSideBottom = 1 << 3;
+
     uint32_t blurRadius;
     float cornerRadiusTLX;
     float cornerRadiusTLY;
@@ -40,6 +46,26 @@ struct BlurRegion {
     int right;
     int bottom;
 
+    // Catalyxx glass: while glassRimWidth is above 0, the region is drawn as a slab of
+    // glass with a curved, lit rim instead of plain blur.
+    // Width of the curved rim, in the region's coordinates.
+    float glassRimWidth = 0.f;
+    // How far past the edge the rim reaches, in rim widths.
+    float glassBend = 0.f;
+    // Blurred share of the flat middle, 0 to 1.
+    float glassFrost = 0.f;
+    // Strength of the light on the rim, 0 to 1.
+    float glassRimLight = 0.f;
+    // Color split of the bent light, 0 to 1.
+    float glassDispersion = 0.f;
+    // Darkness of the glass's shadow, 0 to 1.
+    float glassShadow = 0.f;
+    // kGlassSide* bits: sides where the glass carries on into another region of the
+    // same layer, so they get no rim and no shadow.
+    uint32_t glassJoinedSides = 0;
+
+    inline bool isGlass() const { return glassRimWidth > 0.f; }
+
     inline bool operator==(const BlurRegion& other) const {
         return blurRadius == other.blurRadius && cornerRadiusTLX == other.cornerRadiusTLX &&
                 cornerRadiusTLY == other.cornerRadiusTLY &&
@@ -50,7 +76,11 @@ struct BlurRegion {
                 cornerRadiusBRX == other.cornerRadiusBRX &&
                 cornerRadiusBRY == other.cornerRadiusBRY && alpha == other.alpha &&
                 left == other.left && top == other.top && right == other.right &&
-                bottom == other.bottom;
+                bottom == other.bottom && glassRimWidth == other.glassRimWidth &&
+                glassBend == other.glassBend && glassFrost == other.glassFrost &&
+                glassRimLight == other.glassRimLight &&
+                glassDispersion == other.glassDispersion && glassShadow == other.glassShadow &&
+                glassJoinedSides == other.glassJoinedSides;
     }
 
     inline bool operator!=(const BlurRegion& other) const { return !(*this == other); }
@@ -81,6 +111,15 @@ static inline void PrintTo(const BlurRegion& blurRegion, ::std::ostream* os,
     *os << newline << ".top = " << blurRegion.top;
     *os << newline << ".right = " << blurRegion.right;
     *os << newline << ".bottom = " << blurRegion.bottom;
+    if (blurRegion.isGlass()) {
+        *os << newline << ".glassRimWidth = " << blurRegion.glassRimWidth;
+        *os << newline << ".glassBend = " << blurRegion.glassBend;
+        *os << newline << ".glassFrost = " << blurRegion.glassFrost;
+        *os << newline << ".glassRimLight = " << blurRegion.glassRimLight;
+        *os << newline << ".glassDispersion = " << blurRegion.glassDispersion;
+        *os << newline << ".glassShadow = " << blurRegion.glassShadow;
+        *os << newline << ".glassJoinedSides = " << blurRegion.glassJoinedSides;
+    }
     *os << IndentedNewline(currentIndent) << "}";
 }
 
@@ -104,7 +143,10 @@ struct hash<android::BlurRegion> {
                                     region.cornerRadiusTRY, region.cornerRadiusBLX,
                                     region.cornerRadiusBLY, region.cornerRadiusBRX,
                                     region.cornerRadiusBRY, region.alpha, region.left, region.top,
-                                    region.right, region.bottom);
+                                    region.right, region.bottom, region.glassRimWidth,
+                                    region.glassBend, region.glassFrost, region.glassRimLight,
+                                    region.glassDispersion, region.glassShadow,
+                                    region.glassJoinedSides);
     }
 };
 } // namespace std

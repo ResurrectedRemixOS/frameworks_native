@@ -97,6 +97,14 @@ void LayerFECompositionState::dump(std::string& out) const {
                                 region.cornerRadiusBLX, region.cornerRadiusBLY,
                                 region.cornerRadiusBRX, region.cornerRadiusBRY, region.alpha,
                                 region.left, region.top, region.right, region.bottom);
+            if (region.isGlass()) {
+                base::StringAppendF(&out,
+                                    ", glass={rim=%f, bend=%f, frost=%f, light=%f, "
+                                    "dispersion=%f, shadow=%f, joined=%#x}",
+                                    region.glassRimWidth, region.glassBend, region.glassFrost,
+                                    region.glassRimLight, region.glassDispersion,
+                                    region.glassShadow, region.glassJoinedSides);
+            }
         }
         out.append("\n      }\n      ");
     }
