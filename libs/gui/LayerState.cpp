@@ -215,6 +215,13 @@ status_t layer_state_t::write(Parcel& output) const
         SAFE_PARCEL(output.writeFloat, region.glassDispersion);
         SAFE_PARCEL(output.writeFloat, region.glassShadow);
         SAFE_PARCEL(output.writeUint32, region.glassJoinedSides);
+        for (float channel : region.glassTintOverDark) {
+            SAFE_PARCEL(output.writeFloat, channel);
+        }
+        for (float channel : region.glassTintOverLight) {
+            SAFE_PARCEL(output.writeFloat, channel);
+        }
+        SAFE_PARCEL(output.writeFloat, region.glassAdaptPoint);
     }
 
     SAFE_PARCEL(output.write, stretchEffect);
@@ -413,6 +420,13 @@ status_t layer_state_t::read(const Parcel& input)
         SAFE_PARCEL(input.readFloat, &region.glassDispersion);
         SAFE_PARCEL(input.readFloat, &region.glassShadow);
         SAFE_PARCEL(input.readUint32, &region.glassJoinedSides);
+        for (float& channel : region.glassTintOverDark) {
+            SAFE_PARCEL(input.readFloat, &channel);
+        }
+        for (float& channel : region.glassTintOverLight) {
+            SAFE_PARCEL(input.readFloat, &channel);
+        }
+        SAFE_PARCEL(input.readFloat, &region.glassAdaptPoint);
         blurRegions.push_back(region);
     }
 

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include <array>
 #include <iosfwd>
 #include <iostream>
 
@@ -63,6 +64,13 @@ struct BlurRegion {
     // kGlassSide* bits: sides where the glass carries on into another region of the
     // same layer, so they get no rim and no shadow.
     uint32_t glassJoinedSides = 0;
+    // The glass's own color over dark content and over light content: straight-alpha RGBA,
+    // where alpha is how much of the glass it covers.
+    std::array<float, 4> glassTintOverDark{};
+    std::array<float, 4> glassTintOverLight{};
+    // Brightness of what's behind (0 to 1) around which the glass turns from its dark-content
+    // color to its light-content color; 0 keeps the dark-content color everywhere.
+    float glassAdaptPoint = 0.f;
 
     inline bool isGlass() const { return glassRimWidth > 0.f; }
 
@@ -80,7 +88,10 @@ struct BlurRegion {
                 glassBend == other.glassBend && glassFrost == other.glassFrost &&
                 glassRimLight == other.glassRimLight &&
                 glassDispersion == other.glassDispersion && glassShadow == other.glassShadow &&
-                glassJoinedSides == other.glassJoinedSides;
+                glassJoinedSides == other.glassJoinedSides &&
+                glassTintOverDark == other.glassTintOverDark &&
+                glassTintOverLight == other.glassTintOverLight &&
+                glassAdaptPoint == other.glassAdaptPoint;
     }
 
     inline bool operator!=(const BlurRegion& other) const { return !(*this == other); }
@@ -119,6 +130,13 @@ static inline void PrintTo(const BlurRegion& blurRegion, ::std::ostream* os,
         *os << newline << ".glassDispersion = " << blurRegion.glassDispersion;
         *os << newline << ".glassShadow = " << blurRegion.glassShadow;
         *os << newline << ".glassJoinedSides = " << blurRegion.glassJoinedSides;
+        const auto& dark = blurRegion.glassTintOverDark;
+        const auto& light = blurRegion.glassTintOverLight;
+        *os << newline << ".glassTintOverDark = (" << dark[0] << ", " << dark[1] << ", "
+            << dark[2] << ", " << dark[3] << ")";
+        *os << newline << ".glassTintOverLight = (" << light[0] << ", " << light[1] << ", "
+            << light[2] << ", " << light[3] << ")";
+        *os << newline << ".glassAdaptPoint = " << blurRegion.glassAdaptPoint;
     }
     *os << IndentedNewline(currentIndent) << "}";
 }
@@ -146,7 +164,11 @@ struct hash<android::BlurRegion> {
                                     region.right, region.bottom, region.glassRimWidth,
                                     region.glassBend, region.glassFrost, region.glassRimLight,
                                     region.glassDispersion, region.glassShadow,
-                                    region.glassJoinedSides);
+                                    region.glassJoinedSides, region.glassTintOverDark[0],
+                                    region.glassTintOverDark[1], region.glassTintOverDark[2],
+                                    region.glassTintOverDark[3], region.glassTintOverLight[0],
+                                    region.glassTintOverLight[1], region.glassTintOverLight[2],
+                                    region.glassTintOverLight[3], region.glassAdaptPoint);
     }
 };
 } // namespace std
