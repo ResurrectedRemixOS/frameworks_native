@@ -42,7 +42,9 @@ namespace skia {
 // Catalyxx glass: a blur region drawn as a slab of glass with a rounded rim.
 // The rim bends in what lies just past the edge (the glass's own shadow too),
 // splits it into colors and catches the light; the flat middle shows the
-// content behind it, clear or frosted.
+// content behind it, clear or frosted. The glass has its own color, which
+// turns from one tint to another where the content behind is light, so what
+// sits on the glass stays readable.
 static const SkString kGlassEffectSource(R"(
     uniform shader blurredInput;
     uniform shader originalInput;
@@ -67,6 +69,12 @@ static const SkString kGlassEffectSource(R"(
     uniform float2 shadowDrop;
     // Unit vector toward the light, y pointing down.
     uniform float2 lightDir;
+    // The glass's own color over dark and over light content (straight alpha = how much it
+    // covers), and the brightness of what's behind (0 to 1) around which it turns from one to
+    // the other; 0 keeps tintOverDark everywhere.
+    uniform float4 tintOverDark;
+    uniform float4 tintOverLight;
+    uniform float adaptPoint;
 
     // Signed distance to the outline (negative inside) and the outward normal.
     float outline(float2 p, out float2 normal) {
@@ -117,6 +125,19 @@ static const SkString kGlassEffectSource(R"(
         float3 color = mix(sharp, blurred, frost * smoothstep(0.0, 1.0, 1.0 - edge));
         color *= 1.0 - shadowAt(p + offset);
 
+        // How bright the content behind this spot is, averaged over about a rim width so
+        // small details such as text don't make the glass flicker between its two colors.
+        float reach = 0.75 * rimWidth;
+        float3 around = blurredInput.eval(p + float2(reach, 0.0)).rgb +
+                        blurredInput.eval(p - float2(reach, 0.0)).rgb +
+                        blurredInput.eval(p + float2(0.0, reach)).rgb +
+                        blurredInput.eval(p - float2(0.0, reach)).rgb;
+        float backdrop = dot(0.25 * around, float3(0.2126, 0.7152, 0.0722));
+        float overLight = adaptPoint > 0.0
+                ? smoothstep(adaptPoint - 0.12, adaptPoint + 0.12, backdrop) : 0.0;
+        float4 tint = mix(tintOverDark, tintOverLight, overLight);
+        color = mix(color, tint.rgb, tint.a);
+
         // Light: a thin line all along the edge, brightest facing the light and
         // brighter on the far side than in between, tinted with a rainbow that
         // turns around the outline, over a soft glow inside the lit part of the rim.
@@ -131,10 +152,13 @@ static const SkString kGlassEffectSource(R"(
         float3 lineColor = mix(float3(1.0), rainbow, 0.8 * dispersion);
         // A wet glint where the rim turns straight toward the light.
         float glint = pow(max(facing, 0.0), 12.0) * smoothstep(0.35, 1.0, edge);
-        float3 light = rimLight * (line * catchLight * lineColor +
-                                   0.25 * edge * edge * edge * max(facing, 0.0) + 0.6 * glint);
+        // Over light content a bright line can't be seen; it gives way to a thin dark edge.
+        float3 light = rimLight * (1.0 - 0.8 * overLight) *
+                       (line * catchLight * lineColor +
+                        0.25 * edge * edge * edge * max(facing, 0.0) + 0.6 * glint);
         // Added like light on a screen: bright parts don't clip.
         color = 1.0 - (1.0 - color) * (1.0 - min(light, 1.0));
+        color *= 1.0 - 0.35 * rimLight * overLight * line;
         return half4(half3(color), 1.0);
     }
 )");
@@ -469,6 +493,11 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region,
     builder.uniform("shadowSoftness") = rimWidth * kGlassShadowSoftness;
     builder.uniform("shadowDrop") = SkV2{0.0f, rimWidth * kGlassShadowDrop};
     builder.uniform("lightDir") = kGlassLightDir;
+    const auto& dark = region.glassTintOverDark;
+    const auto& light = region.glassTintOverLight;
+    builder.uniform("tintOverDark") = SkV4{dark[0], dark[1], dark[2], dark[3]};
+    builder.uniform("tintOverLight") = SkV4{light[0], light[1], light[2], light[3]};
+    builder.uniform("adaptPoint") = region.glassAdaptPoint;
     // Without its shader the paint would fill the glass black, so draw plain blur instead.
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
