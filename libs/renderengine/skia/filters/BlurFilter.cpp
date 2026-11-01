@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace android {
 namespace renderengine {
@@ -67,8 +68,10 @@ static const SkString kGlassEffectSource(R"(
     uniform float shadow;
     uniform float shadowSoftness;
     uniform float2 shadowDrop;
-    // Unit vector toward the light, y pointing down.
+    // Unit vector toward the light, y pointing down, and how far it has turned from its usual
+    // place at the top left, in radians.
     uniform float2 lightDir;
+    uniform float lightTurn;
     // The glass's own color over dark and over light content (straight alpha = how much it
     // covers), and the brightness of what's behind (0 to 1) around which it turns from one to
     // the other; 0 keeps tintOverDark everywhere.
@@ -147,8 +150,9 @@ static const SkString kGlassEffectSource(R"(
         float lineWidth = max(1.5, rimWidth * 0.06);
         float line = 1.0 - smoothstep(0.0, lineWidth, depth);
         float angle = atan(normal.y, normal.x);
-        // Whole turns only, so the colors meet up again all the way around.
-        float3 rainbow = 0.5 + 0.5 * cos(5.76 - angle + float3(0.0, 2.094, 4.189));
+        // Whole turns only, so the colors meet up again all the way around. They turn with
+        // the light.
+        float3 rainbow = 0.5 + 0.5 * cos(5.76 + lightTurn - angle + float3(0.0, 2.094, 4.189));
         float3 lineColor = mix(float3(1.0), rainbow, 0.8 * dispersion);
         // A wet glint where the rim turns straight toward the light.
         float glint = pow(max(facing, 0.0), 12.0) * smoothstep(0.35, 1.0, edge);
@@ -213,10 +217,34 @@ static constexpr float kGlassFarAway = 10000.0f;
 // The glass's shadow: its falloff and how far it falls, in rim widths.
 static constexpr float kGlassShadowSoftness = 0.9f;
 static constexpr float kGlassShadowDrop = 0.25f;
-// Unit vector toward the light (up and a little to the left), y pointing down.
+// Unit vector toward the usual light (up and a little to the left), y pointing down.
 static constexpr SkV2 kGlassLightDir = {-0.447214f, -0.894427f};
 
 namespace {
+
+// Where the light on the glass comes from (DisplaySettings::glassLight), as a unit vector,
+// and how far it has turned from the usual light. With the light, the glass's shadow and the
+// colors on its rim turn too.
+struct GlassLight {
+    SkV2 direction;
+    // Radians
+    float turn;
+
+    // The shadow falls this far straight down when the light is the usual one.
+    SkV2 shadowDrop(float drop) const {
+        return {-drop * std::sin(turn), drop * std::cos(turn)};
+    }
+};
+
+GlassLight getGlassLight(const vec2& light) {
+    const float length = std::hypot(light.x, light.y);
+    if (!std::isfinite(length) || length < 0.01f) {
+        return {kGlassLightDir, 0.0f};
+    }
+    const SkV2 direction = {light.x / length, light.y / length};
+    return {direction,
+            std::atan2(direction.y, direction.x) - std::atan2(kGlassLightDir.y, kGlassLightDir.x)};
+}
 
 // A glass outline as its shaders take it.
 struct GlassShape {
@@ -391,7 +419,8 @@ SkRRect BlurFilter::getGlassRRect(const BlurRegion& region) {
     return outline;
 }
 
-void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions) {
+void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions,
+                                  const vec2& light) {
     if (!canDrawGlass()) {
         return;
     }
@@ -432,7 +461,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     builder.uniform("cornerRadii").set(radii.data(), kGlassShadowMaxShapes);
     builder.uniform("shapeCount") = static_cast<float>(count);
     builder.uniform("softness") = softness;
-    builder.uniform("drop") = SkV2{0.0f, drop};
+    builder.uniform("drop") = getGlassLight(light).shadowDrop(drop);
     builder.uniform("strength") = strength;
     // Without its shader the paint would fill the whole area black.
     sk_sp<SkShader> shader = builder.makeShader();
@@ -446,7 +475,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     canvas->drawRect(area, paint);
 }
 
-void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region,
+void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
                                  const SkRect& blurRect, sk_sp<SkImage> blurredImage,
                                  sk_sp<SkImage> input) {
     if (!canDrawGlass() || !input) {
@@ -490,13 +519,15 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region,
     builder.uniform("rimLight") = region.glassRimLight;
     builder.uniform("dispersion") = region.glassDispersion;
     builder.uniform("shadow") = region.glassShadow;
+    const GlassLight glassLight = getGlassLight(light);
     builder.uniform("shadowSoftness") = rimWidth * kGlassShadowSoftness;
-    builder.uniform("shadowDrop") = SkV2{0.0f, rimWidth * kGlassShadowDrop};
-    builder.uniform("lightDir") = kGlassLightDir;
-    const auto& dark = region.glassTintOverDark;
-    const auto& light = region.glassTintOverLight;
-    builder.uniform("tintOverDark") = SkV4{dark[0], dark[1], dark[2], dark[3]};
-    builder.uniform("tintOverLight") = SkV4{light[0], light[1], light[2], light[3]};
+    builder.uniform("shadowDrop") = glassLight.shadowDrop(rimWidth * kGlassShadowDrop);
+    builder.uniform("lightDir") = glassLight.direction;
+    builder.uniform("lightTurn") = glassLight.turn;
+    const auto& overDark = region.glassTintOverDark;
+    const auto& overLight = region.glassTintOverLight;
+    builder.uniform("tintOverDark") = SkV4{overDark[0], overDark[1], overDark[2], overDark[3]};
+    builder.uniform("tintOverLight") = SkV4{overLight[0], overLight[1], overLight[2], overLight[3]};
     builder.uniform("adaptPoint") = region.glassAdaptPoint;
     // Without its shader the paint would fill the glass black, so draw plain blur instead.
     sk_sp<SkShader> shader = builder.makeShader();

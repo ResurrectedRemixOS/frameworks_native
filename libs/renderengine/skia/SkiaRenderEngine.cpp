@@ -1161,7 +1161,7 @@ void SkiaRenderEngine::drawLayersInternal(
                     canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
 
                     // Catalyxx glass: one shadow goes under all of the layer's glass.
-                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions);
+                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, display.glassLight);
 
                     // Clustering regions by blur radius allows regions with a shared blur radius to
                     // reuse the same result from generateTemporaryImage(...). The exact order does
@@ -1178,11 +1178,12 @@ void SkiaRenderEngine::drawLayersInternal(
                     }
 
                     const auto drawRegion =
-                            [this, canvas, &blurRect,
+                            [this, canvas, &display, &blurRect,
                              &blurInput](const sk_sp<SkImage>& temporaryBlurredImage,
                                          const BlurRegion& region) {
                                 if (region.isGlass()) {
-                                    mBlurFilter->drawGlassRegion(canvas, region, blurRect,
+                                    mBlurFilter->drawGlassRegion(canvas, region,
+                                                                 display.glassLight, blurRect,
                                                                  temporaryBlurredImage, blurInput);
                                     return;
                                 }

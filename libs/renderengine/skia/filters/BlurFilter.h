@@ -21,6 +21,7 @@
 #include <SkRRect.h>
 #include <SkRuntimeEffect.h>
 #include <SkSurface.h>
+#include <math/vec2.h>
 #include <ui/BlurRegion.h>
 
 #include <vector>
@@ -80,19 +81,23 @@ public:
 
     /**
      * Draw one soft shadow around all the glass regions in the list, before any of them is
-     * drawn. Pieces that touch or overlap share one shadow.
+     * drawn. Pieces that touch or overlap share one shadow, which falls away from the light.
+     * @param light where the light comes from, as DisplaySettings::glassLight
      */
-    void drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions);
+    void drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions,
+                          const vec2& light);
 
     /**
      * Draw a glass region: its rim bends in the content just past the edge and catches the
      * light, its middle shows the content behind it, clear or frosted.
+     * @param light where the light comes from, as DisplaySettings::glassLight
      * @param blurRect bounds of the blurredImage translated into canvas coordinates
      * @param blurredImage down-sampled blurred content that was produced by the generate() method
      * @param input original unblurred input, which the rim bends
      */
-    void drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const SkRect& blurRect,
-                         sk_sp<SkImage> blurredImage, sk_sp<SkImage> input);
+    void drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
+                         const SkRect& blurRect, sk_sp<SkImage> blurredImage,
+                         sk_sp<SkImage> input);
 
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {

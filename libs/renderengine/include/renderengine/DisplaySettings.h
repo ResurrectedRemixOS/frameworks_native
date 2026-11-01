@@ -22,6 +22,7 @@
 #include <iosfwd>
 
 #include <math/mat4.h>
+#include <math/vec2.h>
 #include <renderengine/PrintUtils.h>
 #include <ui/DebugUtils.h>
 #include <ui/DisplayId.h>
@@ -107,6 +108,11 @@ struct DisplaySettings {
 
     // For now, meaningful primarily when the TonemappingStrategy is Local
     float targetHdrSdrRatio = 1.f;
+
+    // Catalyxx glass: unit vector toward the light on its rim, in the space its blur regions are
+    // in (y pointing down). It moves as the phone tilts. (0, 0) is the usual light, from the top
+    // left.
+    vec2 glassLight = vec2(0.f, 0.f);
 };
 
 static inline bool operator==(const DisplaySettings& lhs, const DisplaySettings& rhs) {
@@ -118,7 +124,8 @@ static inline bool operator==(const DisplaySettings& lhs, const DisplaySettings&
             lhs.deviceHandlesColorTransform == rhs.deviceHandlesColorTransform &&
             lhs.orientation == rhs.orientation &&
             lhs.targetLuminanceNits == rhs.targetLuminanceNits &&
-            lhs.dimmingStage == rhs.dimmingStage && lhs.renderIntent == rhs.renderIntent;
+            lhs.dimmingStage == rhs.dimmingStage && lhs.renderIntent == rhs.renderIntent &&
+            lhs.glassLight == rhs.glassLight;
 }
 
 static const char* orientation_to_string(uint32_t orientation) {
@@ -167,6 +174,8 @@ static inline void PrintTo(const DisplaySettings& settings, ::std::ostream* os,
         << aidl::android::hardware::graphics::composer3::toString(settings.dimmingStage).c_str();
     *os << newline << ".renderIntent = "
         << aidl::android::hardware::graphics::composer3::toString(settings.renderIntent).c_str();
+    *os << newline << ".glassLight = (" << settings.glassLight.x << ", " << settings.glassLight.y
+        << ")";
     *os << IndentedNewline(currentIndent) << "}";
 }
 
