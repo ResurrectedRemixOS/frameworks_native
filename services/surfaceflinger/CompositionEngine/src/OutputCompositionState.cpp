@@ -57,6 +57,10 @@ void OutputCompositionState::dump(std::string& out) const {
     dumpVal(out, "colorTransformMatrix", colorTransformMatrix);
 
     out.append("\n   ");
+    dumpVal(out, "glassLightX", glassLight.x);
+    dumpVal(out, "glassLightY", glassLight.y);
+
+    out.append("\n   ");
     dumpVal(out, "displayBrightnessNits", displayBrightnessNits);
     dumpVal(out, "sdrWhitePointNits", sdrWhitePointNits);
     dumpVal(out, "clientTargetBrightness", clientTargetBrightness);

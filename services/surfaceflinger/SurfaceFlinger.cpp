@@ -3337,6 +3337,22 @@ std::future<void> SurfaceFlinger::offloadGpuCompositedDisplays(
     return offloadedCompositionFuture;
 }
 
+// Whether any of these layers shows Catalyxx glass.
+static bool hasGlass(const std::vector<std::pair<Layer*, LayerFE*>>& layers) {
+    for (const auto& [_, layerFE] : layers) {
+        const auto& snapshot = layerFE->mSnapshot;
+        if (!snapshot || !snapshot->isVisible) {
+            continue;
+        }
+        for (const BlurRegion& region : snapshot->blurRegions) {
+            if (region.isGlass() && region.blurRadius > 0 && region.alpha > 0.f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 CompositeResultsPerDisplay SurfaceFlinger::composite(
         PhysicalDisplayId pacesetterId, const scheduler::FrameTargeters& frameTargeters) {
     SFTRACE_ASYNC_FOR_TRACK_BEGIN(WorkloadTracer::TRACK_NAME, "Composition",
@@ -3392,6 +3408,7 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
     // the scheduler.
     const auto presentTime = systemTime();
     refreshArgs.refreshStartTime = presentTime;
+    refreshArgs.glassLight = getGlassLight();
 
     auto optionalOffloadedRefreshArgs =
             addOutputsToRefreshArgs(pacesetterId, refreshArgs, frameTargeters);
@@ -3401,6 +3418,16 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
             ? copyMergedSnapshots(refreshArgs)
             : addLayerSnapshotsToCompositionArgs(refreshArgs, kCursorOnly);
     prepareLayersForComposition(refreshArgs, kCursorOnly, layers);
+
+    // Catalyxx glass: GlassTilt keeps its light moving only while glass is on a screen that's on.
+    bool anyDisplayOn = false;
+    for (const auto& [_, display] : displays) {
+        if (display->getPowerMode() == hal::PowerMode::ON) {
+            anyDisplayOn = true;
+            break;
+        }
+    }
+    mGlassOnScreen = anyDisplayOn && hasGlass(layers);
 
     for (auto& [layer, layerFE] : layers) {
         validateForReadback(layerFE);
@@ -6647,6 +6674,11 @@ void SurfaceFlinger::setPowerMode(const sp<IBinder>& displayToken, int mode) {
                                                             ftl::FinalizerStd> {
         SFTRACE_FORMAT("%s(%s)", whence, toString(powerMode).c_str());
         mSkipPowerOnForQuiescent = false;
+        if (powerMode != hal::PowerMode::ON) {
+            // Catalyxx glass: a screen going off may not be composited again, so GlassTilt
+            // hears the glass is gone from here.
+            mGlassOnScreen = false;
+        }
         const auto display = FTL_FAKE_GUARD(mStateLock, getDisplayDeviceLocked(displayToken));
         if (!display) {
             Mutex::Autolock lock(mStateLock);
@@ -7367,6 +7399,45 @@ void SurfaceFlinger::updateColorMatrixLocked() {
     }
 }
 
+// Catalyxx glass's light, from GlassTilt in frameworks/base. Not a backdoor code: processes
+// that may use SurfaceFlinger, such as SystemUI, send it.
+constexpr uint32_t kGlassLightTransaction = 1990;
+
+status_t SurfaceFlinger::setGlassLight(const Parcel& data, Parcel* reply) {
+    float x = 0.f;
+    float y = 0.f;
+    if (const status_t error = data.readFloat(&x); error != NO_ERROR) {
+        return error;
+    }
+    if (const status_t error = data.readFloat(&y); error != NO_ERROR) {
+        return error;
+    }
+    // Anything that isn't a direction means the usual light.
+    vec2 light{0.f, 0.f};
+    const float length = std::hypot(x, y);
+    if (std::isfinite(length) && length > 0.01f) {
+        light = vec2(x / length, y / length);
+    }
+
+    bool changed = false;
+    {
+        std::scoped_lock lock(mGlassLightLock);
+        changed = mGlassLight != light;
+        mGlassLight = light;
+    }
+    const bool onScreen = mGlassOnScreen;
+    if (changed && onScreen) {
+        // A still screen only shows the new light once it's composited again.
+        scheduleComposite(FrameHint::kActive);
+    }
+    return reply ? reply->writeBool(onScreen) : NO_ERROR;
+}
+
+vec2 SurfaceFlinger::getGlassLight() {
+    std::scoped_lock lock(mGlassLightLock);
+    return mGlassLight;
+}
+
 status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
 #pragma clang diagnostic push
 #pragma clang diagnostic error "-Wswitch-enum"
@@ -7479,6 +7550,15 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         code == IBinder::SYSPROPS_TRANSACTION) {
         return OK;
     }
+    if (code == kGlassLightTransaction) {
+        if (!callingThreadHasUnscopedSurfaceFlingerAccess()) {
+            IPCThreadState* ipc = IPCThreadState::self();
+            ALOGE("Permission Denial: can't set the glass light pid=%d, uid=%d",
+                  ipc->getCallingPid(), ipc->getCallingUid());
+            return PERMISSION_DENIED;
+        }
+        return OK;
+    }
     // Numbers from 1000 to 1047 are currently used for backdoors. The code
     // in onTransact verifies that the user is root, and has access to use SF.
     if (code >= 1000 && code <= 1047) {
@@ -7494,6 +7574,11 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
                                     uint32_t flags) {
     if (const status_t error = CheckTransactCodeCredentials(code); error != OK) {
         return error;
+    }
+
+    if (code == kGlassLightTransaction) {
+        CHECK_INTERFACE(ISurfaceComposer, data, reply);
+        return setGlassLight(data, reply);
     }
 
     status_t err = BnSurfaceComposer::onTransact(code, data, reply, flags);
@@ -8926,8 +9011,10 @@ ftl::SharedFuture<FenceResult> SurfaceFlinger::renderScreenImpl(
         layerStack = layerFE->getCompositionState()->outputFilter.layerStack;
     }
 
+    // Screenshots show Catalyxx glass in the same light as the screen.
     auto present = [this, buffer = capturedBuffer, dataspace = captureResults.capturedDataspace,
-                    layerStack, args, renderIntent, enableLocalTonemapping]() -> FenceResult {
+                    layerStack, args, renderIntent, enableLocalTonemapping,
+                    glassLight = getGlassLight()]() -> FenceResult {
         std::unique_ptr<compositionengine::CompositionEngine> compositionEngine =
                 mFactory.createCompositionEngine();
         compositionEngine->setRenderEngine(mRenderEngine.get());
@@ -9000,6 +9087,7 @@ ftl::SharedFuture<FenceResult> SurfaceFlinger::renderScreenImpl(
                 .updatingOutputGeometryThisFrame = true,
                 .updatingGeometryThisFrame = true,
                 .colorTransformMatrix = calculateColorMatrix(colorSaturation),
+                .glassLight = glassLight,
         };
         compositionEngine->present(refreshArgs);
 

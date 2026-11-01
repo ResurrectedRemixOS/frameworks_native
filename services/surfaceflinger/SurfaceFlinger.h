@@ -51,6 +51,7 @@
 #include <gui/TransactionState.h>
 #include <layerproto/LayerProtoHeader.h>
 #include <math/mat4.h>
+#include <math/vec2.h>
 #include <renderengine/LayerSettings.h>
 #include <serviceutils/PriorityDumper.h>
 #include <system/graphics.h>
@@ -1374,6 +1375,12 @@ private:
     // either AID_GRAPHICS or AID_SYSTEM.
     status_t CheckTransactCodeCredentials(uint32_t code);
 
+    // Catalyxx glass: takes where the light on its rim comes from, which GlassTilt
+    // (frameworks/base) sends as the phone tilts, and replies whether glass is on a screen
+    // that's on.
+    status_t setGlassLight(const Parcel& data, Parcel* reply) EXCLUDES(mGlassLightLock);
+    vec2 getGlassLight() EXCLUDES(mGlassLightLock);
+
     // Add transaction to the Transaction Queue
 
     /*
@@ -1437,6 +1444,12 @@ private:
 
     std::atomic_bool mMustComposite = false;
     std::atomic_bool mGeometryDirty = false;
+
+    // Catalyxx glass: where the light on it comes from ((0, 0) = the usual light), and whether
+    // the last composition had glass on a screen that's on.
+    std::mutex mGlassLightLock;
+    vec2 mGlassLight GUARDED_BY(mGlassLightLock){0.f, 0.f};
+    std::atomic_bool mGlassOnScreen = false;
 
     // constant members (no synchronization needed for access)
     const nsecs_t mBootTime = systemTime();

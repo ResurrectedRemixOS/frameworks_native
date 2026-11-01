@@ -273,6 +273,29 @@ void Output::setColorTransform(const compositionengine::CompositionRefreshArgs& 
     dirtyEntireOutput();
 }
 
+void Output::setGlassLight(const compositionengine::CompositionRefreshArgs& args) {
+    auto& glassLight = editState().glassLight;
+    if (glassLight == args.glassLight) {
+        return;
+    }
+
+    glassLight = args.glassLight;
+
+    // Catalyxx glass on a still screen must be drawn again to show the light moving.
+    for (const auto* layer : getOutputLayersOrderedByZ()) {
+        const auto* layerFEState = layer->getLayerFE().getCompositionState();
+        if (!layerFEState) {
+            continue;
+        }
+        for (const BlurRegion& region : layerFEState->blurRegions) {
+            if (region.isGlass()) {
+                dirtyEntireOutput();
+                return;
+            }
+        }
+    }
+}
+
 void Output::setColorProfile(const ColorProfile& colorProfile) {
     auto& outputState = editState();
     if (outputState.colorMode == colorProfile.mode &&
@@ -485,6 +508,7 @@ ftl::Future<std::monostate> Output::present(
     planComposition();
     writeCompositionState(refreshArgs);
     setColorTransform(refreshArgs);
+    setGlassLight(refreshArgs);
     beginFrame();
 
     if (isPowerHintSessionEnabled()) {
@@ -1527,6 +1551,7 @@ renderengine::DisplaySettings Output::generateClientCompositionDisplaySettings(
 
     renderengine::DisplaySettings clientCompositionDisplay;
     clientCompositionDisplay.namePlusId = mNamePlusId;
+    clientCompositionDisplay.glassLight = outputState.glassLight;
     clientCompositionDisplay.physicalDisplay = outputState.framebufferSpace.getContent();
     clientCompositionDisplay.clip = outputState.layerStackSpace.getContent();
     clientCompositionDisplay.orientation =

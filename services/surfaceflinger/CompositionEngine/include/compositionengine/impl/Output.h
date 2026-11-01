@@ -179,6 +179,7 @@ protected:
 
 private:
     void dirtyEntireOutput();
+    void setGlassLight(const compositionengine::CompositionRefreshArgs&);
     compositionengine::OutputLayer* findLayerRequestingBackgroundComposition() const;
     void sanitizeOutputLayers() const;
     void finishPrepareFrame();

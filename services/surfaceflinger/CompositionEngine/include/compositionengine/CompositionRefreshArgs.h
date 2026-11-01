@@ -26,6 +26,7 @@
 #include <compositionengine/LayerFE.h>
 #include <compositionengine/OutputColorSetting.h>
 #include <math/mat4.h>
+#include <math/vec2.h>
 #include <scheduler/interface/ICompositor.h>
 #include <ui/FenceTime.h>
 #include <ui/Transform.h>
@@ -102,6 +103,9 @@ struct CompositionRefreshArgs {
 
     // System time for when frame refresh starts. Used for stats.
     nsecs_t refreshStartTime = 0;
+
+    // Where the light on Catalyxx glass comes from, as renderengine::DisplaySettings::glassLight
+    vec2 glassLight{0.f, 0.f};
 };
 
 } // namespace android::compositionengine

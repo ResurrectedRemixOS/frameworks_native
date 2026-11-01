@@ -110,6 +110,9 @@ struct OutputCompositionState {
     // The color transform matrix to apply
     mat4 colorTransformMatrix;
 
+    // Where the light on Catalyxx glass comes from, as renderengine::DisplaySettings::glassLight
+    vec2 glassLight{0.f, 0.f};
+
     // Current active color mode
     ui::ColorMode colorMode{ui::ColorMode::NATIVE};
 
