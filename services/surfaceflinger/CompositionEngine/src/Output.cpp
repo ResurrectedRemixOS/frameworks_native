@@ -281,14 +281,15 @@ void Output::setGlassLight(const compositionengine::CompositionRefreshArgs& args
 
     glassLight = args.glassLight;
 
-    // Catalyxx glass on a still screen must be drawn again to show the light moving.
+    // Catalyxx glass on a still screen must be drawn again to show the light moving; glass with
+    // a fixed light looks the same in any light.
     for (const auto* layer : getOutputLayersOrderedByZ()) {
         const auto* layerFEState = layer->getLayerFE().getCompositionState();
         if (!layerFEState) {
             continue;
         }
         for (const BlurRegion& region : layerFEState->blurRegions) {
-            if (region.isGlass()) {
+            if (region.hasMovingLight()) {
                 dirtyEntireOutput();
                 return;
             }

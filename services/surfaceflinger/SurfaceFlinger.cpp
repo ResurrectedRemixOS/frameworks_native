@@ -3337,7 +3337,9 @@ std::future<void> SurfaceFlinger::offloadGpuCompositedDisplays(
     return offloadedCompositionFuture;
 }
 
-// Whether any of these layers shows Catalyxx glass.
+// Whether any of these layers shows Catalyxx glass whose light follows the tilt. Glass with a
+// fixed light, such as the navigation bar's, which shows nearly all the time, doesn't count:
+// GlassTilt would otherwise keep listening to the phone and sending the light for it.
 static bool hasGlass(const std::vector<std::pair<Layer*, LayerFE*>>& layers) {
     for (const auto& [_, layerFE] : layers) {
         const auto& snapshot = layerFE->mSnapshot;
@@ -3345,7 +3347,7 @@ static bool hasGlass(const std::vector<std::pair<Layer*, LayerFE*>>& layers) {
             continue;
         }
         for (const BlurRegion& region : snapshot->blurRegions) {
-            if (region.isGlass() && region.blurRadius > 0 && region.alpha > 0.f) {
+            if (region.hasMovingLight() && region.blurRadius > 0 && region.alpha > 0.f) {
                 return true;
             }
         }

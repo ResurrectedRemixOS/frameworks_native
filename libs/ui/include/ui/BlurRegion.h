@@ -31,6 +31,10 @@ struct BlurRegion {
     static constexpr uint32_t kGlassSideTop = 1 << 1;
     static constexpr uint32_t kGlassSideRight = 1 << 2;
     static constexpr uint32_t kGlassSideBottom = 1 << 3;
+    // Also in glassJoinedSides: glass that keeps the usual light whatever the phone's tilt, such
+    // as glass that shows nearly all the time, which mustn't keep the tilt sensor running and
+    // the screen being drawn again as the light moves.
+    static constexpr uint32_t kGlassFixedLight = 1 << 4;
 
     uint32_t blurRadius;
     float cornerRadiusTLX;
@@ -62,7 +66,7 @@ struct BlurRegion {
     // Darkness of the glass's shadow, 0 to 1.
     float glassShadow = 0.f;
     // kGlassSide* bits: sides where the glass carries on into another region of the
-    // same layer, so they get no rim and no shadow.
+    // same layer, so they get no rim and no shadow; and kGlassFixedLight.
     uint32_t glassJoinedSides = 0;
     // The glass's own color over dark content and over light content: straight-alpha RGBA,
     // where alpha is how much of the glass it covers.
@@ -73,6 +77,11 @@ struct BlurRegion {
     float glassAdaptPoint = 0.f;
 
     inline bool isGlass() const { return glassRimWidth > 0.f; }
+
+    // Glass whose light follows the phone's tilt: all glass but kGlassFixedLight's.
+    inline bool hasMovingLight() const {
+        return isGlass() && !(glassJoinedSides & kGlassFixedLight);
+    }
 
     inline bool operator==(const BlurRegion& other) const {
         return blurRadius == other.blurRadius && cornerRadiusTLX == other.cornerRadiusTLX &&

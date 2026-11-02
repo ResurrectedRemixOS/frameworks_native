@@ -431,6 +431,8 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     size_t count = 0;
     float strength = 0.0f;
     float rimWidth = 0.0f;
+    // The layer's one shadow falls in the usual light while all its glass has a fixed light.
+    bool movingLight = false;
     SkRect area = SkRect::MakeEmpty();
     for (const BlurRegion& region : regions) {
         // Regions without a blur radius aren't drawn, so they cast no shadow either.
@@ -445,6 +447,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
         bounds[count] = shape.bounds;
         radii[count] = shape.radii;
         count++;
+        movingLight = movingLight || region.hasMovingLight();
         strength = std::max(strength, region.glassShadow * region.alpha);
         rimWidth = std::max(rimWidth, getGlassRimWidth(region, outline.rect()));
         area.join(outline.rect());
@@ -461,7 +464,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     builder.uniform("cornerRadii").set(radii.data(), kGlassShadowMaxShapes);
     builder.uniform("shapeCount") = static_cast<float>(count);
     builder.uniform("softness") = softness;
-    builder.uniform("drop") = getGlassLight(light).shadowDrop(drop);
+    builder.uniform("drop") = getGlassLight(movingLight ? light : vec2(0.f, 0.f)).shadowDrop(drop);
     builder.uniform("strength") = strength;
     // Without its shader the paint would fill the whole area black.
     sk_sp<SkShader> shader = builder.makeShader();
@@ -519,7 +522,8 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     builder.uniform("rimLight") = region.glassRimLight;
     builder.uniform("dispersion") = region.glassDispersion;
     builder.uniform("shadow") = region.glassShadow;
-    const GlassLight glassLight = getGlassLight(light);
+    // Glass with a fixed light keeps the usual one, (0, 0)
+    const GlassLight glassLight = getGlassLight(region.hasMovingLight() ? light : vec2(0.f, 0.f));
     builder.uniform("shadowSoftness") = rimWidth * kGlassShadowSoftness;
     builder.uniform("shadowDrop") = glassLight.shadowDrop(rimWidth * kGlassShadowDrop);
     builder.uniform("lightDir") = glassLight.direction;
