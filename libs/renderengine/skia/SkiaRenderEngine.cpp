@@ -253,15 +253,17 @@ static inline std::pair<SkRRect, SkRRect> getBoundsAndClip(
     return {SkRRect::MakeRect(bounds), clip};
 }
 
-// Catalyxx glass that's clear shows the sharp content in its flat middle, so its blur only
-// tells how bright that content is, which a small blur tells as well: half the blur passes or
-// fewer, whatever blur radius its window asked for.
-static constexpr uint32_t kClearGlassMaxBlurRadius = 32;
+// Catalyxx glass that's clear and doesn't adapt to what's behind it never shows its blur: its
+// middle and rim show the content sharp, and only the adaptive tint reads the blur, to tell how
+// bright the content is (so adaptive glass keeps the blur its window asked for: that blur's size
+// shapes the tint). Glass that never shows it is blurred as little as can be, in one pass.
+static constexpr uint32_t kUnseenGlassBlurRadius = 1;
 
 // The blur radius to blur behind `region` with.
 static inline uint32_t blurRadiusToDraw(const BlurRegion& region, bool canDrawGlass) {
-    if (canDrawGlass && region.isGlass() && region.glassFrost <= 0.0f) {
-        return std::min(region.blurRadius, kClearGlassMaxBlurRadius);
+    if (canDrawGlass && region.isGlass() && region.glassFrost <= 0.0f &&
+        region.glassAdaptPoint <= 0.0f) {
+        return std::min(region.blurRadius, kUnseenGlassBlurRadius);
     }
     return region.blurRadius;
 }
