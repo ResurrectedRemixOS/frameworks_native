@@ -114,6 +114,31 @@ static const SkString kGlassEffectSource(R"(
     half4 main(float2 p) {
         float2 normal;
         float depth = max(-outline(p, normal), 0.0);
+
+        // How bright the content behind this spot is, averaged over about a rim width so
+        // small details such as text don't make the glass flicker between its two colors.
+        float overLight = 0.0;
+        if (adaptPoint > 0.0) {
+            float reach = 0.75 * rimWidth;
+            float3 around = blurredInput.eval(p + float2(reach, 0.0)).rgb +
+                            blurredInput.eval(p - float2(reach, 0.0)).rgb +
+                            blurredInput.eval(p + float2(0.0, reach)).rgb +
+                            blurredInput.eval(p - float2(0.0, reach)).rgb;
+            float backdrop = dot(0.25 * around, float3(0.2126, 0.7152, 0.0722));
+            overLight = smoothstep(adaptPoint - 0.12, adaptPoint + 0.12, backdrop);
+        }
+        float4 tint = mix(tintOverDark, tintOverLight, overLight);
+
+        // Past the rim nothing bends, and no shadow, line or glint reaches: all the rim's work
+        // below comes to just this there, for a fraction of it.
+        float lineWidth = max(1.5, rimWidth * 0.06);
+        if (depth >= max(rimWidth, lineWidth)) {
+            float3 middle = frost >= 1.0 ? blurredInput.eval(p).rgb
+                          : frost <= 0.0 ? originalInput.eval(p).rgb
+                          : mix(originalInput.eval(p).rgb, blurredInput.eval(p).rgb, frost);
+            return half4(half3(mix(middle, tint.rgb, tint.a)), 1.0);
+        }
+
         // 1 on the very edge, 0 where the rim meets the flat middle.
         float edge = 1.0 - clamp(depth / rimWidth, 0.0, 1.0);
 
@@ -127,18 +152,6 @@ static const SkString kGlassEffectSource(R"(
         // The middle is as frosted as asked; the rim stays clear so its bend shows.
         float3 color = mix(sharp, blurred, frost * smoothstep(0.0, 1.0, 1.0 - edge));
         color *= 1.0 - shadowAt(p + offset);
-
-        // How bright the content behind this spot is, averaged over about a rim width so
-        // small details such as text don't make the glass flicker between its two colors.
-        float reach = 0.75 * rimWidth;
-        float3 around = blurredInput.eval(p + float2(reach, 0.0)).rgb +
-                        blurredInput.eval(p - float2(reach, 0.0)).rgb +
-                        blurredInput.eval(p + float2(0.0, reach)).rgb +
-                        blurredInput.eval(p - float2(0.0, reach)).rgb;
-        float backdrop = dot(0.25 * around, float3(0.2126, 0.7152, 0.0722));
-        float overLight = adaptPoint > 0.0
-                ? smoothstep(adaptPoint - 0.12, adaptPoint + 0.12, backdrop) : 0.0;
-        float4 tint = mix(tintOverDark, tintOverLight, overLight);
         color = mix(color, tint.rgb, tint.a);
 
         // Light: a thin line all along the edge, brightest facing the light and
@@ -147,7 +160,6 @@ static const SkString kGlassEffectSource(R"(
         float facing = dot(normal, lightDir);
         float catchLight = 0.3 + 0.7 * pow(max(facing, 0.0), 2.0) +
                            0.4 * pow(max(-facing, 0.0), 2.0);
-        float lineWidth = max(1.5, rimWidth * 0.06);
         float line = 1.0 - smoothstep(0.0, lineWidth, depth);
         float angle = atan(normal.y, normal.x);
         // Whole turns only, so the colors meet up again all the way around. They turn with
@@ -197,15 +209,20 @@ static const SkString kGlassShadowEffectSource(R"(
 
     half4 main(float2 p) {
         float here = 1.0e9;
-        float dropped = 1.0e9;
         for (int i = 0; i < 8; i++) {
             if (float(i) < shapeCount) {
                 here = min(here, outline(p, shapeBounds[i], cornerRadii[i]));
-                dropped = min(dropped, outline(p - drop, shapeBounds[i], cornerRadii[i]));
             }
         }
+        // Nothing is drawn under the glass itself, so no need to look further there
         if (here < 0.0) {
             return half4(0.0);
+        }
+        float dropped = 1.0e9;
+        for (int i = 0; i < 8; i++) {
+            if (float(i) < shapeCount) {
+                dropped = min(dropped, outline(p - drop, shapeBounds[i], cornerRadii[i]));
+            }
         }
         float x = clamp((dropped + 0.5 * softness) / (1.5 * softness), 0.0, 1.0);
         return half4(0.0, 0.0, 0.0, half(strength * (1.0 - x) * (1.0 - x)));
