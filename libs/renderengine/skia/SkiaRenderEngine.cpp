@@ -253,6 +253,19 @@ static inline std::pair<SkRRect, SkRRect> getBoundsAndClip(
     return {SkRRect::MakeRect(bounds), clip};
 }
 
+// Catalyxx glass that's clear shows the sharp content in its flat middle, so its blur only
+// tells how bright that content is, which a small blur tells as well: half the blur passes or
+// fewer, whatever blur radius its window asked for.
+static constexpr uint32_t kClearGlassMaxBlurRadius = 32;
+
+// The blur radius to blur behind `region` with.
+static inline uint32_t blurRadiusToDraw(const BlurRegion& region, bool canDrawGlass) {
+    if (canDrawGlass && region.isGlass() && region.glassFrost <= 0.0f) {
+        return std::min(region.blurRadius, kClearGlassMaxBlurRadius);
+    }
+    return region.blurRadius;
+}
+
 static inline bool layerSamplesBehind(const android::renderengine::LayerSettings& layer,
                                       bool colorTransformModifiesAlpha) {
     if (layer.backgroundBlurRadius > 0 || layer.blurRegions.size() ||
@@ -1169,10 +1182,11 @@ void SkiaRenderEngine::drawLayersInternal(
                     // semi-arbitrarily.
                     using BlurRegionList = ftl::SmallVector<BlurRegion, 4>;
                     ftl::SmallMap<uint32_t, BlurRegionList, 2> regionsPerRadius;
+                    const bool canDrawGlass = mBlurFilter->canDrawGlass();
                     for (const BlurRegion& region : layer.blurRegions) {
                         if (region.blurRadius > 0) {
-                            const auto& [entry, _] = regionsPerRadius.try_emplace(region.blurRadius,
-                                                                                  BlurRegionList());
+                            const auto& [entry, _] = regionsPerRadius.try_emplace(
+                                    blurRadiusToDraw(region, canDrawGlass), BlurRegionList());
                             entry->second.push_back(region);
                         }
                     }
