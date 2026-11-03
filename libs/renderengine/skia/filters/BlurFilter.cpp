@@ -364,7 +364,7 @@ void BlurFilter::drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                                 const uint32_t blurRadius, const float zoomScale,
                                 const float blurAlpha,
                                 const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                                sk_sp<SkImage> input) {
+                                sk_sp<SkImage> input, SkIPoint inputOrigin) {
     SFTRACE_CALL();
 
     SkPaint paint;
@@ -391,6 +391,7 @@ void BlurFilter::drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                     blurRect.height() * (1 - zoomScale) / 2.0f);
             inputMatrix.preScale(zoomScale, zoomScale);
         }
+        inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
 
         SkRuntimeShaderBuilder blurBuilder(mMixEffect);
         blurBuilder.child("blurredInput") = blurShader;
@@ -497,10 +498,10 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
 
 void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
                                  const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                                 sk_sp<SkImage> input) {
+                                 sk_sp<SkImage> input, SkIPoint inputOrigin) {
     if (!canDrawGlass() || !input) {
         drawBlurRegion(canvas, getGlassRRect(region), region.blurRadius, 1.0f, region.alpha,
-                       blurRect, blurredImage, input);
+                       blurRect, blurredImage, input, inputOrigin);
         return;
     }
     SFTRACE_CALL();
@@ -517,6 +518,7 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
         ALOGE("matrix was unable to be inverted");
     }
+    inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
 
     // Like plain blur, small radii fade toward the sharp content.
     float frost = region.glassFrost;
@@ -555,7 +557,7 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     if (!shader) {
         ALOGE("Catalyxx glass could not be made, drawing plain blur");
         drawBlurRegion(canvas, outline, region.blurRadius, 1.0f, region.alpha, blurRect,
-                       blurredImage, input);
+                       blurredImage, input, inputOrigin);
         return;
     }
 

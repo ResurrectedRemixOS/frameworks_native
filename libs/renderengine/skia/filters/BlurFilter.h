@@ -63,11 +63,14 @@ public:
      * @param blurRect bounds of the blurredImage translated into canvas coordinates
      * @param blurredImage down-sampled blurred content that was produced by the generate() method
      * @param input original unblurred input that is used to crossfade with the blurredImage
+     * @param inputOrigin where input's top left corner is in device coordinates, when it holds
+     *                    only part of the display
      */
     void drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                                 const uint32_t blurRadius, const float zoomScale,
                                 const float blurAlpha, const SkRect& blurRect,
-                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input);
+                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input,
+                                SkIPoint inputOrigin = SkIPoint::Make(0, 0));
 
     float getMaxCrossFadeRadius() const;
 
@@ -94,10 +97,12 @@ public:
      * @param blurRect bounds of the blurredImage translated into canvas coordinates
      * @param blurredImage down-sampled blurred content that was produced by the generate() method
      * @param input original unblurred input, which the rim bends
+     * @param inputOrigin where input's top left corner is in device coordinates, as for
+     *                    drawBlurRegion()
      */
     void drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
                          const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                         sk_sp<SkImage> input);
+                         sk_sp<SkImage> input, SkIPoint inputOrigin = SkIPoint::Make(0, 0));
 
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {

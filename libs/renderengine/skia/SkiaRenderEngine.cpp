@@ -51,6 +51,7 @@
 #include <SkString.h>
 #include <SkSurface.h>
 #include <SkTileMode.h>
+#include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <android/ipcrenderbuffer/RenderBufferHelpers.h>
 #include <common/FlagManager.h>
@@ -65,6 +66,7 @@
 #include <include/gpu/ganesh/GrTypes.h>
 #include <include/gpu/ganesh/SkSurfaceGanesh.h>
 #include <include/private/SkHdrMetadata.h>
+#include <include/utils/SkNoDrawCanvas.h>
 #include <pthread.h>
 #include <src/core/SkTraceEventCommon.h>
 #include <sync/sync.h>
@@ -289,6 +291,63 @@ static inline SkM44 getSkM44(const android::mat4& matrix) {
                  matrix[0][1], matrix[1][1], matrix[2][1], matrix[3][1],
                  matrix[0][2], matrix[1][2], matrix[2][2], matrix[3][2],
                  matrix[0][3], matrix[1][3], matrix[2][3], matrix[3][3]);
+}
+
+// Catalyxx glass: a blurred layer often reads only part of what's under it, which is then drawn
+// or copied on its own instead of all of the display. The ways, as bits of the
+// debug.renderengine.glass_input property (all on unless it says otherwise; 0 = as Android does):
+// - kBlurInputBackdrop: when the lowest layer that needs what's under it sharp (glass, or a
+//   crossfaded blur) has nothing blurred under it, the part it reads is drawn first, on its own,
+//   instead of drawing everything under it offscreen and copying all of that to the display.
+// - kBlurInputSubsetCopy: a layer higher up copies only the part of the display it reads.
+// - kBlurInputClearFirst: otherwise the offscreen is copied onto a cleared display, which spares
+//   the GPU loading the last frame first.
+static constexpr int kBlurInputBackdrop = 1 << 0;
+static constexpr int kBlurInputSubsetCopy = 1 << 1;
+static constexpr int kBlurInputClearFirst = 1 << 2;
+static constexpr int kBlurInputDefault =
+        kBlurInputBackdrop | kBlurInputSubsetCopy | kBlurInputClearFirst;
+// Past this share of the display, the part a layer reads isn't worth drawing or copying alone.
+static constexpr float kBlurInputMaxShare = 0.6f;
+// Filtering reads a texel or two past where the blur and the glass are drawn.
+static constexpr int kBlurInputMargin = 4;
+
+// The part of what's under `layer` that its blur regions read, in device coordinates: its blur
+// rect (`blurRect`, already in device coordinates, as `layerMatrix` maps the layer) and each
+// glass region as far out as its rim bends the content in. Empty when the layer reads more than
+// that (a background blur, or an effect on what's behind it) or too big a share of
+// `surfaceBounds` for drawing or copying it alone to be worth it.
+static SkIRect getBlurInputBounds(const LayerSettings& layer, const SkMatrix& layerMatrix,
+                                  const SkRect& blurRect, bool canDrawGlass,
+                                  const SkIRect& surfaceBounds) {
+    if (layer.backgroundBlurRadius > 0 || layer.postProcessEffect || layer.blurRegions.empty()) {
+        return SkIRect::MakeEmpty();
+    }
+    SkIRect bounds = blurRect.roundOut().makeOutset(kBlurInputMargin, kBlurInputMargin);
+    SkMatrix regionMatrix = layerMatrix;
+    regionMatrix.preConcat(getSkM44(layer.blurRegionTransform).asM33());
+    for (const BlurRegion& region : layer.blurRegions) {
+        if (region.blurRadius == 0) {
+            continue;
+        }
+        // The rim bends in the content from up to bend x rim width past where it's drawn,
+        // blue from the furthest.
+        const float reach = region.isGlass() && canDrawGlass
+                ? std::abs(region.glassBend) * region.glassRimWidth *
+                        (1.0f + 0.5f * std::abs(region.glassDispersion))
+                : 0.0f;
+        const SkRect read = SkRect::MakeLTRB(region.left, region.top, region.right, region.bottom)
+                                    .makeOutset(reach, reach);
+        bounds.join(regionMatrix.mapRect(read).roundOut().makeOutset(kBlurInputMargin,
+                                                                      kBlurInputMargin));
+    }
+    if (!bounds.intersect(surfaceBounds) ||
+        static_cast<float>(bounds.width()) * static_cast<float>(bounds.height()) >
+                kBlurInputMaxShare * static_cast<float>(surfaceBounds.width()) *
+                        static_cast<float>(surfaceBounds.height())) {
+        return SkIRect::MakeEmpty();
+    }
+    return bounds;
 }
 
 [[maybe_unused]]
@@ -986,6 +1045,12 @@ void SkiaRenderEngine::drawLayersInternal(
     SkCanvas* canvas = dstCanvas;
     SkiaCapture::OffscreenState offscreenCaptureState;
     const LayerSettings* blurCompositionLayer = nullptr;
+    // Catalyxx glass: the lowest layer that reads what's under it sharp, when the part it reads is
+    // drawn on its own first instead (kBlurInputBackdrop), and that part on the display.
+    const int blurInputMode =
+            base::GetIntProperty("debug.renderengine.glass_input", kBlurInputDefault);
+    const LayerSettings* backdropLayer = nullptr;
+    SkIRect backdropBounds = SkIRect::MakeEmpty();
     if (mBlurFilter) {
         bool requiresCompositionLayer = false;
         bool hasBlur = false;
@@ -994,6 +1059,7 @@ void SkiaRenderEngine::drawLayersInternal(
             if (!layerSamplesBehind(layer, ctModifiesAlpha)) {
                 continue;
             }
+            const bool blurredUnder = hasBlur;
             hasBlur = true;
             if (layer.postProcessEffect &&
                 layer.postProcessTarget == LayerSettings::SampleTarget::Behind) {
@@ -1011,6 +1077,33 @@ void SkiaRenderEngine::drawLayersInternal(
                 }
             }
             if (requiresCompositionLayer) {
+                if ((blurInputMode & kBlurInputBackdrop) && !blurredUnder &&
+                    !mCapture->isCaptureRunning()) {
+                    // Where the layer reads, worked out as the layer will be drawn below
+                    SkNoDrawCanvas placement(dstSurface->width(), dstSurface->height());
+                    initCanvas(&placement, display);
+                    placement.concat(getSkM44(layer.geometry.positionTransform).asM33());
+                    const auto [bounds, roundRectClip] =
+                            getBoundsAndClip(layer.geometry.boundaries,
+                                             layer.geometry.roundedCornersCrop,
+                                             layer.geometry.roundedCornersRadii);
+                    SkRect blurRect = placement.getTotalMatrix().mapRect(bounds.rect());
+                    if (blurRect.intersect(SkRect::Make(placement.getDeviceClipBounds()))) {
+                        backdropBounds =
+                                getBlurInputBounds(layer, placement.getTotalMatrix(), blurRect,
+                                                   mBlurFilter->canDrawGlass(),
+                                                   SkIRect::MakeWH(dstSurface->width(),
+                                                                   dstSurface->height()));
+                        // Starting on whole 8-pixel steps, so what's drawn there matches the
+                        // display pixel for pixel, dithering too
+                        backdropBounds.fLeft &= ~7;
+                        backdropBounds.fTop &= ~7;
+                    }
+                }
+                if (!backdropBounds.isEmpty()) {
+                    backdropLayer = &layer;
+                    break;
+                }
                 activeSurface = dstSurface->makeSurface(dstSurface->imageInfo());
                 canvas = mCapture->tryOffscreenCapture(activeSurface.get(), &offscreenCaptureState);
                 blurCompositionLayer = &layer;
@@ -1037,14 +1130,14 @@ void SkiaRenderEngine::drawLayersInternal(
         mRenderDoc.startFrameCapture();
     }
 
-    // Clear the entire canvas with a transparent black to prevent ghost images.
-    canvas->clear(SK_ColorTRANSPARENT);
-    initCanvas(canvas, display);
-
     if (kPrintLayerSettings) {
         logSettings(display);
     }
-    for (const auto& layer : layers) {
+    // Catalyxx glass: what's under backdropLayer, where it reads it, once drawn on its own
+    sk_sp<SkSurface> backdropSurface;
+    sk_sp<SkImage> backdropImage;
+    // Draws `layer` to `canvas`, as set up for the display.
+    const auto drawLayer = [&](const LayerSettings& layer) REQUIRES(mRenderingMutex) {
         SFTRACE_FORMAT("DrawLayer: %s", layer.name.c_str());
 
         if (kPrintLayerSettings) {
@@ -1052,6 +1145,13 @@ void SkiaRenderEngine::drawLayersInternal(
         }
 
         sk_sp<SkImage> blurInput;
+        // Where blurInput's top left corner is on the display: it may hold only the part of the
+        // display this layer's blur reads.
+        SkIPoint inputOrigin = SkIPoint::Make(0, 0);
+        if (backdropLayer == &layer && backdropImage) {
+            blurInput = backdropImage;
+            inputOrigin = SkIPoint::Make(backdropBounds.fLeft, backdropBounds.fTop);
+        }
         if (blurCompositionLayer == &layer) {
             LOG_THREAD_STATE_AND_CRASH_IF(activeSurface == dstSurface);
             LOG_THREAD_STATE_AND_CRASH_IF(canvas == dstCanvas);
@@ -1063,6 +1163,11 @@ void SkiaRenderEngine::drawLayersInternal(
             // a rotation animation, or if blur regions are used), the entire screen is
             // initialized.
             if (layer.blurRegions.size() || FlagManager::getInstance().restore_blur_step()) {
+                // Catalyxx glass: the copy covers all of the display, so the GPU needn't load the
+                // last frame first (kBlurInputClearFirst)
+                if (blurInputMode & kBlurInputClearFirst) {
+                    dstCanvas->clear(SK_ColorTRANSPARENT);
+                }
                 SkPaint paint;
                 paint.setBlendMode(SkBlendMode::kSrc);
                 if (CC_UNLIKELY(mCapture->isCaptureRunning())) {
@@ -1118,6 +1223,17 @@ void SkiaRenderEngine::drawLayersInternal(
                 ALOGW("blur bounds does not intersect display clip!");
             }
 
+            // Catalyxx glass: the part of the display this layer reads, when copying only that is
+            // worth it (kBlurInputSubsetCopy)
+            SkIRect inputBounds = SkIRect::MakeEmpty();
+            if (!blurInput && (blurInputMode & kBlurInputSubsetCopy) &&
+                !mCapture->isCaptureRunning()) {
+                inputBounds = getBlurInputBounds(layer, canvas->getTotalMatrix(), blurRect,
+                                                 mBlurFilter->canDrawGlass(),
+                                                 SkIRect::MakeWH(activeSurface->width(),
+                                                                 activeSurface->height()));
+            }
+
             // if the clip needs to be applied then apply it now and make sure
             // it is restored before we attempt to draw any shadows.
             SkAutoCanvasRestore acr(canvas, true);
@@ -1149,11 +1265,20 @@ void SkiaRenderEngine::drawLayersInternal(
                         // If we require cross fading with the blur input, we need to make sure we
                         // make a copy of the surface to the image since we will be writing to the
                         // surface while sampling the blurInput.
-                        blurInput = activeSurface->makeImageSnapshot();
+                        if (!inputBounds.isEmpty()) {
+                            blurInput = activeSurface->makeImageSnapshot(inputBounds);
+                            inputOrigin = SkIPoint::Make(inputBounds.fLeft, inputBounds.fTop);
+                        }
+                        if (!blurInput) {
+                            blurInput = activeSurface->makeImageSnapshot();
+                            inputOrigin = SkIPoint::Make(0, 0);
+                        }
                     } else {
                         blurInput = activeSurface->makeTemporaryImage();
                     }
                 }
+                // Where blurRect is in blurInput
+                const SkRect inputBlurRect = blurRect.makeOffset(-inputOrigin.fX, -inputOrigin.fY);
 
                 sk_sp<SkImage> temporaryBlurredImage = nullptr; // Might be reused by blur regions.
                 if (layer.backgroundBlurRadius > 0) {
@@ -1164,11 +1289,11 @@ void SkiaRenderEngine::drawLayersInternal(
                     temporaryBlurredImage =
                             mBlurFilter->generateTemporaryImage(context, display,
                                                                 layer.backgroundBlurRadius,
-                                                                blurInput, blurRect);
+                                                                blurInput, inputBlurRect);
 
                     mBlurFilter->drawBlurRegion(canvas, bounds, layer.backgroundBlurRadius,
                                                 layer.backgroundBlurScale, 1.0f, blurRect,
-                                                temporaryBlurredImage, blurInput);
+                                                temporaryBlurredImage, blurInput, inputOrigin);
                 }
 
                 if (layer.blurRegions.size()) {
@@ -1194,19 +1319,20 @@ void SkiaRenderEngine::drawLayersInternal(
                     }
 
                     const auto drawRegion =
-                            [this, canvas, &display, &blurRect,
-                             &blurInput](const sk_sp<SkImage>& temporaryBlurredImage,
-                                         const BlurRegion& region) {
+                            [this, canvas, &display, &blurRect, &blurInput,
+                             &inputOrigin](const sk_sp<SkImage>& temporaryBlurredImage,
+                                           const BlurRegion& region) {
                                 if (region.isGlass()) {
                                     mBlurFilter->drawGlassRegion(canvas, region,
                                                                  display.glassLight, blurRect,
-                                                                 temporaryBlurredImage, blurInput);
+                                                                 temporaryBlurredImage, blurInput,
+                                                                 inputOrigin);
                                     return;
                                 }
                                 mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
                                                             region.blurRadius, 1.0f, region.alpha,
                                                             blurRect, temporaryBlurredImage,
-                                                            blurInput);
+                                                            blurInput, inputOrigin);
                             };
 
                     // Reuse existing temporaryBlurredImage from background blur for any regions
@@ -1226,7 +1352,7 @@ void SkiaRenderEngine::drawLayersInternal(
                             SFTRACE_NAME("BlurRegion");
                             temporaryBlurredImage =
                                     mBlurFilter->generateTemporaryImage(context, display, radius,
-                                                                        blurInput, blurRect);
+                                                                        blurInput, inputBlurRect);
                         }
                         for (const BlurRegion& region : regions) {
                             drawRegion(temporaryBlurredImage, region);
@@ -1236,8 +1362,8 @@ void SkiaRenderEngine::drawLayersInternal(
 
                 if (layer.postProcessTarget == renderengine::LayerSettings::SampleTarget::Behind &&
                     layer.postProcessEffect) {
-                    const auto drawInverse =
-                            canvas->getTotalMatrix().invert().value_or(SkMatrix::I());
+                    auto drawInverse = canvas->getTotalMatrix().invert().value_or(SkMatrix::I());
+                    drawInverse.preTranslate(inputOrigin.fX, inputOrigin.fY);
                     auto inputShader =
                             blurInput->makeShader(SkSamplingOptions(SkFilterMode::kLinear),
                                                   drawInverse);
@@ -1393,7 +1519,7 @@ void SkiaRenderEngine::drawLayersInternal(
         if (layer.skipContentDraw ||
             (layer.alpha == 0 && !requiresLinearEffect && !layer.disableBlending &&
              (!displayColorTransform || displayColorTransform->isAlphaUnchanged()))) {
-            continue;
+            return;
         }
 
         const ui::Dataspace layerDataspace = layer.sourceDataspace;
@@ -1654,6 +1780,41 @@ void SkiaRenderEngine::drawLayersInternal(
             // and refactoring).
             skgpu::ganesh::Flush(activeSurface);
         }
+    };
+
+    // Catalyxx glass: draw what's under backdropLayer, where it reads it, before anything is
+    // drawn to the display (later, the display's drawing would be split in two around it).
+    // Without it, backdropLayer copies what it reads from the display instead.
+    if (backdropLayer) {
+        SFTRACE_NAME("BlurBackdrop");
+        backdropSurface = dstSurface->makeSurface(
+                dstSurface->imageInfo().makeWH(backdropBounds.width(), backdropBounds.height()));
+        if (backdropSurface) {
+            SkCanvas* const displayCanvas = canvas;
+            canvas = backdropSurface->getCanvas();
+            {
+                AutoSaveRestore backdropAutoSaveRestore(canvas);
+                canvas->clear(SK_ColorTRANSPARENT);
+                canvas->translate(-backdropBounds.fLeft, -backdropBounds.fTop);
+                initCanvas(canvas, display);
+                for (const auto& layer : layers) {
+                    if (&layer == backdropLayer) {
+                        break;
+                    }
+                    drawLayer(layer);
+                }
+            }
+            canvas = displayCanvas;
+            backdropImage = backdropSurface->makeTemporaryImage();
+        }
+    }
+
+    // Clear the entire canvas with a transparent black to prevent ghost images.
+    canvas->clear(SK_ColorTRANSPARENT);
+    initCanvas(canvas, display);
+
+    for (const auto& layer : layers) {
+        drawLayer(layer);
     }
 
     surfaceAutoSaveRestore.restore();
