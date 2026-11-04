@@ -222,6 +222,7 @@ status_t layer_state_t::write(Parcel& output) const
             SAFE_PARCEL(output.writeFloat, channel);
         }
         SAFE_PARCEL(output.writeFloat, region.glassAdaptPoint);
+        SAFE_PARCEL(output.writeFloat, region.glassMelt);
     }
 
     SAFE_PARCEL(output.write, stretchEffect);
@@ -427,6 +428,7 @@ status_t layer_state_t::read(const Parcel& input)
             SAFE_PARCEL(input.readFloat, &channel);
         }
         SAFE_PARCEL(input.readFloat, &region.glassAdaptPoint);
+        SAFE_PARCEL(input.readFloat, &region.glassMelt);
         blurRegions.push_back(region);
     }
 

@@ -75,6 +75,10 @@ struct BlurRegion {
     // Brightness of what's behind (0 to 1) around which the glass turns from its dark-content
     // color to its light-content color; 0 keeps the dark-content color everywhere.
     float glassAdaptPoint = 0.f;
+    // How far this glass melts into the other glass of its layer, in the region's coordinates:
+    // pieces start to reach for each other when they're this close, and a neck joins them from a
+    // third of it. 0 keeps the glass to itself, unless another piece melts into it.
+    float glassMelt = 0.f;
 
     inline bool isGlass() const { return glassRimWidth > 0.f; }
 
@@ -100,7 +104,7 @@ struct BlurRegion {
                 glassJoinedSides == other.glassJoinedSides &&
                 glassTintOverDark == other.glassTintOverDark &&
                 glassTintOverLight == other.glassTintOverLight &&
-                glassAdaptPoint == other.glassAdaptPoint;
+                glassAdaptPoint == other.glassAdaptPoint && glassMelt == other.glassMelt;
     }
 
     inline bool operator!=(const BlurRegion& other) const { return !(*this == other); }
@@ -146,6 +150,7 @@ static inline void PrintTo(const BlurRegion& blurRegion, ::std::ostream* os,
         *os << newline << ".glassTintOverLight = (" << light[0] << ", " << light[1] << ", "
             << light[2] << ", " << light[3] << ")";
         *os << newline << ".glassAdaptPoint = " << blurRegion.glassAdaptPoint;
+        *os << newline << ".glassMelt = " << blurRegion.glassMelt;
     }
     *os << IndentedNewline(currentIndent) << "}";
 }
@@ -177,7 +182,8 @@ struct hash<android::BlurRegion> {
                                     region.glassTintOverDark[1], region.glassTintOverDark[2],
                                     region.glassTintOverDark[3], region.glassTintOverLight[0],
                                     region.glassTintOverLight[1], region.glassTintOverLight[2],
-                                    region.glassTintOverLight[3], region.glassAdaptPoint);
+                                    region.glassTintOverLight[3], region.glassAdaptPoint,
+                                    region.glassMelt);
     }
 };
 } // namespace std

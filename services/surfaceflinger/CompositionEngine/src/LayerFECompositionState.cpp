@@ -104,12 +104,13 @@ void LayerFECompositionState::dump(std::string& out) const {
                                     ", glass={rim=%f, bend=%f, frost=%f, light=%f, "
                                     "dispersion=%f, shadow=%f, joined=%#x, "
                                     "tintOverDark=(%.3f, %.3f, %.3f, %.3f), "
-                                    "tintOverLight=(%.3f, %.3f, %.3f, %.3f), adaptPoint=%.3f}",
+                                    "tintOverLight=(%.3f, %.3f, %.3f, %.3f), adaptPoint=%.3f, "
+                                    "melt=%.1f}",
                                     region.glassRimWidth, region.glassBend, region.glassFrost,
                                     region.glassRimLight, region.glassDispersion,
                                     region.glassShadow, region.glassJoinedSides, dark[0], dark[1],
                                     dark[2], dark[3], light[0], light[1], light[2], light[3],
-                                    region.glassAdaptPoint);
+                                    region.glassAdaptPoint, region.glassMelt);
             }
         }
         out.append("\n      }\n      ");
