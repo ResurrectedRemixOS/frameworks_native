@@ -326,6 +326,14 @@ static SkIRect getBlurInputBounds(const LayerSettings& layer, const SkMatrix& la
     SkIRect bounds = blurRect.roundOut().makeOutset(kBlurInputMargin, kBlurInputMargin);
     SkMatrix regionMatrix = layerMatrix;
     regionMatrix.preConcat(getSkM44(layer.blurRegionTransform).asM33());
+    // Glass that melts together bulges past its pieces' outlines, by at most a share of the size
+    // it melts at, and their necks lie between them.
+    float meltBulge = 0.0f;
+    for (const BlurRegion& region : layer.blurRegions) {
+        if (region.isGlass() && canDrawGlass) {
+            meltBulge = std::max(meltBulge, region.glassMelt * BlurFilter::kGlassMeltBulge);
+        }
+    }
     for (const BlurRegion& region : layer.blurRegions) {
         if (region.blurRadius == 0) {
             continue;
@@ -334,7 +342,8 @@ static SkIRect getBlurInputBounds(const LayerSettings& layer, const SkMatrix& la
         // blue from the furthest.
         const float reach = region.isGlass() && canDrawGlass
                 ? std::abs(region.glassBend) * region.glassRimWidth *
-                        (1.0f + 0.5f * std::abs(region.glassDispersion))
+                                (1.0f + 0.5f * std::abs(region.glassDispersion)) +
+                        meltBulge
                 : 0.0f;
         const SkRect read = SkRect::MakeLTRB(region.left, region.top, region.right, region.bottom)
                                     .makeOutset(reach, reach);
@@ -1300,8 +1309,13 @@ void SkiaRenderEngine::drawLayersInternal(
                     SkAutoCanvasRestore acr(canvas, true);
                     canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
 
+                    // Catalyxx glass: what melts together is drawn as one, from the blur that the
+                    // most blurred of its pieces asks for.
+                    const auto melts = mBlurFilter->findGlassMelts(layer.blurRegions);
+
                     // Catalyxx glass: one shadow goes under all of the layer's glass.
-                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, display.glassLight);
+                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, melts,
+                                                  display.glassLight);
 
                     // Clustering regions by blur radius allows regions with a shared blur radius to
                     // reuse the same result from generateTemporaryImage(...). The exact order does
@@ -1310,12 +1324,26 @@ void SkiaRenderEngine::drawLayersInternal(
                     using BlurRegionList = ftl::SmallVector<BlurRegion, 4>;
                     ftl::SmallMap<uint32_t, BlurRegionList, 2> regionsPerRadius;
                     const bool canDrawGlass = mBlurFilter->canDrawGlass();
-                    for (const BlurRegion& region : layer.blurRegions) {
+                    std::vector<uint32_t> meltRadii(melts.melts.size(), 0);
+                    for (size_t i = 0; i < layer.blurRegions.size(); i++) {
+                        const BlurRegion& region = layer.blurRegions[i];
                         if (region.blurRadius > 0) {
-                            const auto& [entry, _] = regionsPerRadius.try_emplace(
-                                    blurRadiusToDraw(region, canDrawGlass), BlurRegionList());
+                            const uint32_t radius = blurRadiusToDraw(region, canDrawGlass);
+                            if (melts.contains(i)) {
+                                for (size_t m = 0; m < melts.melts.size(); m++) {
+                                    if (melts.melts[m].regions >> i & 1) {
+                                        meltRadii[m] = std::max(meltRadii[m], radius);
+                                    }
+                                }
+                                continue;
+                            }
+                            const auto& [entry, _] =
+                                    regionsPerRadius.try_emplace(radius, BlurRegionList());
                             entry->second.push_back(region);
                         }
+                    }
+                    for (const uint32_t radius : meltRadii) {
+                        regionsPerRadius.try_emplace(radius, BlurRegionList());
                     }
 
                     const auto drawRegion =
@@ -1334,6 +1362,20 @@ void SkiaRenderEngine::drawLayersInternal(
                                                             blurRect, temporaryBlurredImage,
                                                             blurInput, inputOrigin);
                             };
+                    // Catalyxx glass: what melts together, with this blur
+                    const auto drawMelts =
+                            [this, canvas, &display, &blurRect, &blurInput, &inputOrigin, &melts,
+                             &meltRadii](const sk_sp<SkImage>& temporaryBlurredImage,
+                                         uint32_t radius) {
+                                for (size_t m = 0; m < melts.melts.size(); m++) {
+                                    if (meltRadii[m] == radius) {
+                                        mBlurFilter->drawGlassMelt(canvas, melts.melts[m],
+                                                                   display.glassLight, blurRect,
+                                                                   temporaryBlurredImage, blurInput,
+                                                                   inputOrigin);
+                                    }
+                                }
+                            };
 
                     // Reuse existing temporaryBlurredImage from background blur for any regions
                     // with the same blur radius.
@@ -1343,6 +1385,7 @@ void SkiaRenderEngine::drawLayersInternal(
                              regionsPerRadius.get(layer.backgroundBlurRadius)->get()) {
                             drawRegion(temporaryBlurredImage, region);
                         }
+                        drawMelts(temporaryBlurredImage, layer.backgroundBlurRadius);
                         regionsPerRadius.erase(layer.backgroundBlurRadius);
                     }
 
@@ -1357,6 +1400,7 @@ void SkiaRenderEngine::drawLayersInternal(
                         for (const BlurRegion& region : regions) {
                             drawRegion(temporaryBlurredImage, region);
                         }
+                        drawMelts(temporaryBlurredImage, radius);
                     }
                 }
 

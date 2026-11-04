@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <initializer_list>
 
 namespace android {
 namespace renderengine {
@@ -46,47 +47,38 @@ namespace skia {
 // content behind it, clear or frosted. The glass has its own color, which
 // turns from one tint to another where the content behind is light, so what
 // sits on the glass stays readable.
-static const SkString kGlassEffectSource(R"(
+//
+// The shader comes in parts, as glass that melts together (kGlassMeltPart) is drawn just like
+// glass on its own (kGlassOnePiecePart), only from a different outline.
+static const char kGlassCommonPart[] = R"(
     uniform shader blurredInput;
     uniform shader originalInput;
 
-    // Glass outline in local coordinates; joined sides are pushed far out.
-    uniform float4 shapeBounds;
-    // Corner radii: top-left, top-right, bottom-right, bottom-left.
-    uniform float4 cornerRadii;
-    // Width of the curved rim.
-    uniform float rimWidth;
     // How far past the edge the rim reaches, in rim widths.
     uniform float bend;
-    // Blurred share of the flat middle, 0 to 1.
-    uniform float frost;
     // Strength of the light on the rim, 0 to 1.
     uniform float rimLight;
     // Color split of the bent light, 0 to 1.
     uniform float dispersion;
-    // Darkness of the glass's shadow, 0 to 1, and its falloff and offset.
+    // Darkness of the glass's shadow, 0 to 1.
     uniform float shadow;
-    uniform float shadowSoftness;
-    uniform float2 shadowDrop;
     // Unit vector toward the light, y pointing down, and how far it has turned from its usual
     // place at the top left, in radians.
     uniform float2 lightDir;
     uniform float lightTurn;
-    // The glass's own color over dark and over light content (straight alpha = how much it
-    // covers), and the brightness of what's behind (0 to 1) around which it turns from one to
-    // the other; 0 keeps tintOverDark everywhere.
-    uniform float4 tintOverDark;
-    uniform float4 tintOverLight;
+    // The brightness of what's behind (0 to 1) around which the glass turns from its color over
+    // dark content to its color over light content; 0 keeps the first everywhere.
     uniform float adaptPoint;
 
-    // Signed distance to the outline (negative inside) and the outward normal.
-    float outline(float2 p, out float2 normal) {
-        float2 center = (shapeBounds.xy + shapeBounds.zw) * 0.5;
-        float2 halfSize = (shapeBounds.zw - shapeBounds.xy) * 0.5;
+    // Signed distance to a rounded rect's outline (negative inside) and the outward normal.
+    // Corner radii: top-left, top-right, bottom-right, bottom-left.
+    float outlineOf(float2 p, float4 bounds, float4 radii, out float2 normal) {
+        float2 center = (bounds.xy + bounds.zw) * 0.5;
+        float2 halfSize = (bounds.zw - bounds.xy) * 0.5;
         float2 q = p - center;
         float2 side = float2(q.x < 0.0 ? -1.0 : 1.0, q.y < 0.0 ? -1.0 : 1.0);
-        float radius = q.y < 0.0 ? (q.x < 0.0 ? cornerRadii.x : cornerRadii.y)
-                                 : (q.x < 0.0 ? cornerRadii.w : cornerRadii.z);
+        float radius = q.y < 0.0 ? (q.x < 0.0 ? radii.x : radii.y)
+                                 : (q.x < 0.0 ? radii.w : radii.z);
         float2 d = abs(q) - halfSize + radius;
         if (d.x > 0.0 && d.y > 0.0) {
             normal = side * normalize(d);
@@ -97,24 +89,139 @@ static const SkString kGlassEffectSource(R"(
         }
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
     }
+)";
+
+// Glass on its own, one rounded rect, which Skia draws with its edge smoothed.
+static const char kGlassOnePiecePart[] = R"(
+    // Glass outline in local coordinates; joined sides are pushed far out.
+    uniform float4 shapeBounds;
+    uniform float4 cornerRadii;
+    // Width of the curved rim.
+    uniform float rimWidth;
+    // Blurred share of the flat middle, 0 to 1.
+    uniform float frost;
+    // The falloff and offset of the glass's shadow.
+    uniform float shadowSoftness;
+    uniform float2 shadowDrop;
+    // The glass's own color over dark and over light content (straight alpha = how much it
+    // covers).
+    uniform float4 tintOverDark;
+    uniform float4 tintOverLight;
 
     // Darkness of the glass's shadow on the content at p. It fades in across the
     // edge, so the rim's bent view of it has no hard line.
-    float shadowAt(float2 p) {
+    float shadowAt(float2 p, float rim) {
         if (shadow <= 0.0) {
             return 0.0;
         }
         float2 unused;
-        float fadeIn = smoothstep(-0.4 * rimWidth, 0.4 * rimWidth, outline(p, unused));
-        float x = clamp((outline(p - shadowDrop, unused) + 0.5 * shadowSoftness) /
-                        (1.5 * shadowSoftness), 0.0, 1.0);
+        float fadeIn = smoothstep(-0.4 * rim, 0.4 * rim,
+                                  outlineOf(p, shapeBounds, cornerRadii, unused));
+        float x = clamp((outlineOf(p - shadowDrop, shapeBounds, cornerRadii, unused) +
+                         0.5 * shadowSoftness) / (1.5 * shadowSoftness), 0.0, 1.0);
         return shadow * fadeIn * (1.0 - x) * (1.0 - x);
     }
 
     half4 main(float2 p) {
         float2 normal;
-        float depth = max(-outline(p, normal), 0.0);
+        float depth = max(-outlineOf(p, shapeBounds, cornerRadii, normal), 0.0);
+        const half cover = 1.0;
+)";
 
+// Up to 4 pieces of glass melted into one surface, which this draws all of, edge included: where
+// two come within meltSize of each other their outlines reach for each other, and from a third of
+// it a neck joins them. Each keeps its own rim width, alpha, frost and colors, which blend where
+// they meet.
+static const char kGlassMeltPart[] = R"(
+    uniform float4 shapeBounds[4];
+    uniform float4 cornerRadii[4];
+    uniform float4 shapeRims;
+    uniform float4 shapeAlphas;
+    uniform float4 shapeFrosts;
+    uniform float4 shapeTintsOverDark[4];
+    uniform float4 shapeTintsOverLight[4];
+    uniform float shapeCount;
+    uniform float meltSize;
+    // The falloff and offset of the glass's shadow, in rim widths.
+    uniform float shadowSoftnessInRims;
+    uniform float2 shadowDropInRims;
+
+    // Signed distance to the melted outline, its slope, which is shorter than 1 where the pieces
+    // blend, and what the glass is like there: its rim width, alpha and frost, and colors.
+    float surfaceAt(float2 p, out float2 normal, out float3 look, out float4 overDark,
+                    out float4 overLight) {
+        float d = outlineOf(p, shapeBounds[0], cornerRadii[0], normal);
+        look = float3(shapeRims[0], shapeAlphas[0], shapeFrosts[0]);
+        overDark = shapeTintsOverDark[0];
+        overLight = shapeTintsOverLight[0];
+        for (int i = 1; i < 4; i++) {
+            if (float(i) < shapeCount) {
+                float2 n;
+                float other = outlineOf(p, shapeBounds[i], cornerRadii[i], n);
+                // A cubic smooth minimum: it only reaches where the two are within meltSize of
+                // each other, and its slope and curve are smooth, so what the rim bends has no
+                // kinks. The farther piece counts for up to half of the slope.
+                float h = max(meltSize - abs(d - other), 0.0) / meltSize;
+                float far = 0.5 * h * h;
+                float share = d < other ? far : 1.0 - far;
+                normal = mix(normal, n, share);
+                look = mix(look, float3(shapeRims[i], shapeAlphas[i], shapeFrosts[i]), share);
+                overDark = mix(overDark, shapeTintsOverDark[i], share);
+                overLight = mix(overLight, shapeTintsOverLight[i], share);
+                d = min(d, other) - h * h * h * meltSize / 6.0;
+            }
+        }
+        return d;
+    }
+
+    // Signed distance to the melted outline alone.
+    float meltedOutline(float2 p) {
+        float2 unused;
+        float d = outlineOf(p, shapeBounds[0], cornerRadii[0], unused);
+        for (int i = 1; i < 4; i++) {
+            if (float(i) < shapeCount) {
+                float other = outlineOf(p, shapeBounds[i], cornerRadii[i], unused);
+                float h = max(meltSize - abs(d - other), 0.0) / meltSize;
+                d = min(d, other) - h * h * h * meltSize / 6.0;
+            }
+        }
+        return d;
+    }
+
+    float shadowAt(float2 p, float rim) {
+        if (shadow <= 0.0) {
+            return 0.0;
+        }
+        float fadeIn = smoothstep(-0.4 * rim, 0.4 * rim, meltedOutline(p));
+        float softness = shadowSoftnessInRims * rim;
+        float x = clamp((meltedOutline(p - shadowDropInRims * rim) + 0.5 * softness) /
+                        (1.5 * softness), 0.0, 1.0);
+        return shadow * fadeIn * (1.0 - x) * (1.0 - x);
+    }
+
+    half4 main(float2 p) {
+        float2 normal;
+        float3 look;
+        float4 tintOverDark;
+        float4 tintOverLight;
+        float rawDistance = surfaceAt(p, normal, look, tintOverDark, tintOverLight);
+        // The distance as near as the slope tells, so the rim and the line along it keep their
+        // width along a neck. The slope itself stays as it is, shorter than 1: it fades to nothing
+        // where the rim turns inside a neck, so what the rim bends has no seam there.
+        float signedDistance = rawDistance / max(length(normal), 0.3);
+        normal.x += 0.0001;
+        half cover = half(clamp(0.5 - signedDistance, 0.0, 1.0) * look.y);
+        if (cover <= 0.0) {
+            return half4(0.0);
+        }
+        float rimWidth = look.x;
+        float frost = look.z;
+        float depth = max(-signedDistance, 0.0);
+)";
+
+// The rest of the shader's main(), from how deep in the glass p is, what the glass is like there
+// and how much of the pixel it covers.
+static const char kGlassBodyPart[] = R"(
         // How bright the content behind this spot is, averaged over about a rim width so
         // small details such as text don't make the glass flicker between its two colors.
         float overLight = 0.0;
@@ -136,7 +243,7 @@ static const SkString kGlassEffectSource(R"(
             float3 middle = frost >= 1.0 ? blurredInput.eval(p).rgb
                           : frost <= 0.0 ? originalInput.eval(p).rgb
                           : mix(originalInput.eval(p).rgb, blurredInput.eval(p).rgb, frost);
-            return half4(half3(mix(middle, tint.rgb, tint.a)), 1.0);
+            return half4(half3(mix(middle, tint.rgb, tint.a)) * cover, cover);
         }
 
         // 1 on the very edge, 0 where the rim meets the flat middle.
@@ -151,7 +258,7 @@ static const SkString kGlassEffectSource(R"(
         float3 blurred = blurredInput.eval(p + offset).rgb;
         // The middle is as frosted as asked; the rim stays clear so its bend shows.
         float3 color = mix(sharp, blurred, frost * smoothstep(0.0, 1.0, 1.0 - edge));
-        color *= 1.0 - shadowAt(p + offset);
+        color *= 1.0 - shadowAt(p + offset, rimWidth);
         color = mix(color, tint.rgb, tint.a);
 
         // Light: a thin line all along the edge, brightest facing the light and
@@ -175,9 +282,17 @@ static const SkString kGlassEffectSource(R"(
         // Added like light on a screen: bright parts don't clip.
         color = 1.0 - (1.0 - color) * (1.0 - min(light, 1.0));
         color *= 1.0 - 0.35 * rimLight * overLight * line;
-        return half4(half3(color), 1.0);
+        return half4(half3(color) * cover, cover);
     }
-)");
+)";
+
+static SkString makeSource(std::initializer_list<const char*> parts) {
+    SkString source;
+    for (const char* part : parts) {
+        source.append(part);
+    }
+    return source;
+}
 
 // Most glass pieces one shadow can go around; matches the arrays below.
 static constexpr size_t kGlassShadowMaxShapes = 8;
@@ -185,7 +300,7 @@ static constexpr size_t kGlassShadowMaxShapes = 8;
 // Catalyxx glass shadow: one soft shadow around all the glass of a layer,
 // falling a little lower than it. Glass pieces that touch or overlap share
 // one shadow, and nothing is drawn under the glass itself.
-static const SkString kGlassShadowEffectSource(R"(
+static const char kGlassShadowCommonPart[] = R"(
     uniform float4 shapeBounds[8];
     // Corner radii: top-left, top-right, bottom-right, bottom-left.
     uniform float4 cornerRadii[8];
@@ -206,12 +321,35 @@ static const SkString kGlassShadowEffectSource(R"(
         float2 d = abs(q) - halfSize + radius;
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
     }
+)";
 
+// Pieces of glass on their own: the shadow goes around all of them.
+static const char kGlassShadowOnePiecePart[] = R"(
+    float united(float d, float other, int i) {
+        return min(d, other);
+    }
+)";
+
+// Where glass melts together, its first meltCount pieces, the shadow follows the melted outline.
+static const char kGlassShadowMeltPart[] = R"(
+    uniform float meltCount;
+    uniform float meltSize;
+
+    float united(float d, float other, int i) {
+        if (float(i) < meltCount) {
+            float h = max(meltSize - abs(d - other), 0.0) / meltSize;
+            return min(d, other) - h * h * h * meltSize / 6.0;
+        }
+        return min(d, other);
+    }
+)";
+
+static const char kGlassShadowBodyPart[] = R"(
     half4 main(float2 p) {
         float here = 1.0e9;
         for (int i = 0; i < 8; i++) {
             if (float(i) < shapeCount) {
-                here = min(here, outline(p, shapeBounds[i], cornerRadii[i]));
+                here = united(here, outline(p, shapeBounds[i], cornerRadii[i]), i);
             }
         }
         // Nothing is drawn under the glass itself, so no need to look further there
@@ -221,13 +359,13 @@ static const SkString kGlassShadowEffectSource(R"(
         float dropped = 1.0e9;
         for (int i = 0; i < 8; i++) {
             if (float(i) < shapeCount) {
-                dropped = min(dropped, outline(p - drop, shapeBounds[i], cornerRadii[i]));
+                dropped = united(dropped, outline(p - drop, shapeBounds[i], cornerRadii[i]), i);
             }
         }
         float x = clamp((dropped + 0.5 * softness) / (1.5 * softness), 0.0, 1.0);
         return half4(0.0, 0.0, 0.0, half(strength * (1.0 - x) * (1.0 - x)));
     }
-)");
+)";
 
 // Joined glass sides pushed this far out show no rim.
 static constexpr float kGlassFarAway = 10000.0f;
@@ -236,6 +374,11 @@ static constexpr float kGlassShadowSoftness = 0.9f;
 static constexpr float kGlassShadowDrop = 0.25f;
 // Unit vector toward the usual light (up and a little to the left), y pointing down.
 static constexpr SkV2 kGlassLightDir = {-0.447214f, -0.894427f};
+// The sides in BlurRegion::glassJoinedSides, which also holds BlurRegion::kGlassFixedLight.
+static constexpr uint32_t kGlassSides = BlurRegion::kGlassSideLeft | BlurRegion::kGlassSideTop |
+        BlurRegion::kGlassSideRight | BlurRegion::kGlassSideBottom;
+// Where two pieces of glass that are to melt line up within this, they're one body of glass.
+static constexpr float kGlassJoinTolerance = 1.5f;
 
 namespace {
 
@@ -343,10 +486,12 @@ BlurFilter::BlurFilter(RuntimeEffectManager& effectManager, const float maxCross
         mMixEffect(effectManager.mKnownEffects[kBlurFilter_MixEffect]) {
     SkRuntimeEffect::Options options;
     options.fName = "RE_CatalyxxGlass";
-    auto [glassEffect, glassError] = SkRuntimeEffect::MakeForShader(kGlassEffectSource, options);
+    auto [glassEffect, glassError] = SkRuntimeEffect::MakeForShader(
+            makeSource({kGlassCommonPart, kGlassOnePiecePart, kGlassBodyPart}), options);
     options.fName = "RE_CatalyxxGlassShadow";
-    auto [shadowEffect, shadowError] =
-            SkRuntimeEffect::MakeForShader(kGlassShadowEffectSource, options);
+    auto [shadowEffect, shadowError] = SkRuntimeEffect::MakeForShader(
+            makeSource({kGlassShadowCommonPart, kGlassShadowOnePiecePart, kGlassShadowBodyPart}),
+            options);
     if (!glassEffect || !shadowEffect) {
         ALOGE("Catalyxx glass is drawn as plain blur, its effects failed to build: %s %s",
               glassError.c_str(), shadowError.c_str());
@@ -437,8 +582,205 @@ SkRRect BlurFilter::getGlassRRect(const BlurRegion& region) {
     return outline;
 }
 
+bool BlurFilter::buildGlassMeltEffects() {
+    if (mGlassMeltEffect && mGlassMeltShadowEffect) {
+        return true;
+    }
+    if (mGlassMeltFailed) {
+        return false;
+    }
+    SkRuntimeEffect::Options options;
+    options.fName = "RE_CatalyxxGlassMelt";
+    auto [glassEffect, glassError] = SkRuntimeEffect::MakeForShader(
+            makeSource({kGlassCommonPart, kGlassMeltPart, kGlassBodyPart}), options);
+    options.fName = "RE_CatalyxxGlassMeltShadow";
+    auto [shadowEffect, shadowError] = SkRuntimeEffect::MakeForShader(
+            makeSource({kGlassShadowCommonPart, kGlassShadowMeltPart, kGlassShadowBodyPart}),
+            options);
+    if (!glassEffect || !shadowEffect) {
+        ALOGE("Catalyxx glass doesn't melt, its effects failed to build: %s %s",
+              glassError.c_str(), shadowError.c_str());
+        mGlassMeltFailed = true;
+        return false;
+    }
+    mGlassMeltEffect = std::move(glassEffect);
+    mGlassMeltShadowEffect = std::move(shadowEffect);
+    return true;
+}
+
+float BlurFilter::getGlassFrost(const BlurRegion& region) const {
+    // Like plain blur, small radii fade toward the sharp content.
+    float frost = region.glassFrost;
+    if (region.blurRadius < mMaxCrossFadeRadius) {
+        frost *= region.blurRadius / mMaxCrossFadeRadius;
+    }
+    return frost;
+}
+
+BlurFilter::GlassMelts BlurFilter::findGlassMelts(const std::vector<BlurRegion>& regions) {
+    GlassMelts melts;
+    // Nearly always, nothing melts
+    if (!canDrawGlass() ||
+        std::none_of(regions.begin(), regions.end(),
+                     [](const BlurRegion& region) {
+                         return region.isGlass() && region.blurRadius > 0 && region.glassMelt > 0.0f;
+                     }) ||
+        !buildGlassMeltEffects()) {
+        return melts;
+    }
+
+    // A body of glass: a region, or pieces joined to each other that make one rounded rect.
+    struct Body {
+        SkRect rect;
+        SkV4 radii;
+        uint32_t joinedSides;
+        float melt;
+        bool movingLight;
+        uint64_t regions;
+        const BlurRegion* region;
+    };
+    std::vector<Body> bodies;
+    for (size_t i = 0; i < regions.size() && i < sizeof(uint64_t) * 8; i++) {
+        const BlurRegion& region = regions[i];
+        if (!region.isGlass() || region.blurRadius == 0) {
+            continue;
+        }
+        const SkRRect outline = getGlassRRect(region);
+        bodies.push_back({outline.rect(),
+                          getGlassShape(outline, 0, false).radii,
+                          region.glassJoinedSides & kGlassSides,
+                          region.glassMelt,
+                          region.hasMovingLight(),
+                          uint64_t{1} << i,
+                          &region});
+    }
+
+    // Pieces carrying on into each other, such as the volume panel's ringer drawer and its slider:
+    // the piece above or to the left comes first.
+    const auto carriesOn = [](const Body& first, const Body& second) {
+        const SkRect& a = first.rect;
+        const SkRect& b = second.rect;
+        if ((first.joinedSides & BlurRegion::kGlassSideBottom) &&
+            (second.joinedSides & BlurRegion::kGlassSideTop)) {
+            return std::abs(a.left() - b.left()) <= kGlassJoinTolerance &&
+                    std::abs(a.right() - b.right()) <= kGlassJoinTolerance &&
+                    a.top() <= b.top() && b.top() <= a.bottom() + kGlassJoinTolerance;
+        }
+        if ((first.joinedSides & BlurRegion::kGlassSideRight) &&
+            (second.joinedSides & BlurRegion::kGlassSideLeft)) {
+            return std::abs(a.top() - b.top()) <= kGlassJoinTolerance &&
+                    std::abs(a.bottom() - b.bottom()) <= kGlassJoinTolerance &&
+                    a.left() <= b.left() && b.left() <= a.right() + kGlassJoinTolerance;
+        }
+        return false;
+    };
+    for (size_t i = 0; i < bodies.size(); i++) {
+        for (size_t j = 0; j < bodies.size(); j++) {
+            if (i == j || !carriesOn(bodies[i], bodies[j])) {
+                continue;
+            }
+            Body& first = bodies[i];
+            const Body& second = bodies[j];
+            const bool vertical = first.joinedSides & BlurRegion::kGlassSideBottom;
+            // The outer corners are each piece's own
+            first.radii = vertical ? SkV4{first.radii.x, first.radii.y, second.radii.z, second.radii.w}
+                                   : SkV4{first.radii.x, second.radii.y, second.radii.z, first.radii.w};
+            first.joinedSides = vertical
+                    ? (first.joinedSides & ~BlurRegion::kGlassSideBottom) |
+                            (second.joinedSides & ~BlurRegion::kGlassSideTop)
+                    : (first.joinedSides & ~BlurRegion::kGlassSideRight) |
+                            (second.joinedSides & ~BlurRegion::kGlassSideLeft);
+            first.rect.join(second.rect);
+            first.melt = std::max(first.melt, second.melt);
+            first.movingLight = first.movingLight || second.movingLight;
+            first.regions |= second.regions;
+            bodies.erase(bodies.begin() + j);
+            // Whatever comes next starts over, with this piece as it is now
+            i = static_cast<size_t>(-1);
+            break;
+        }
+    }
+
+    // Which bodies reach each other, in groups. A piece still carrying on into something else
+    // keeps its own way of drawing that side.
+    std::vector<size_t> groupOf(bodies.size());
+    for (size_t i = 0; i < bodies.size(); i++) {
+        groupOf[i] = i;
+    }
+    for (size_t i = 0; i < bodies.size(); i++) {
+        for (size_t j = i + 1; j < bodies.size(); j++) {
+            const Body& a = bodies[i];
+            const Body& b = bodies[j];
+            const float size = std::max(a.melt, b.melt);
+            if (size <= 0.0f || a.joinedSides != 0 || b.joinedSides != 0) {
+                continue;
+            }
+            const float gapX = std::max({a.rect.left() - b.rect.right(),
+                                         b.rect.left() - a.rect.right(), 0.0f});
+            const float gapY = std::max({a.rect.top() - b.rect.bottom(),
+                                         b.rect.top() - a.rect.bottom(), 0.0f});
+            if (std::hypot(gapX, gapY) >= size) {
+                continue;
+            }
+            const size_t from = groupOf[j];
+            const size_t to = groupOf[i];
+            for (size_t& group : groupOf) {
+                if (group == from) {
+                    group = to;
+                }
+            }
+        }
+    }
+
+    for (size_t group = 0; group < bodies.size(); group++) {
+        if (std::count(groupOf.begin(), groupOf.end(), group) < 2) {
+            continue;
+        }
+        GlassMelt melt;
+        melt.area = SkRect::MakeEmpty();
+        for (size_t i = 0; i < bodies.size() && melt.count < GlassMelt::kMaxShapes; i++) {
+            if (groupOf[i] != group) {
+                continue;
+            }
+            const Body& body = bodies[i];
+            const BlurRegion& region = *body.region;
+            const size_t shape = melt.count++;
+            melt.bounds[shape] = {body.rect.left(), body.rect.top(), body.rect.right(),
+                                  body.rect.bottom()};
+            melt.radii[shape] = body.radii;
+            // The rim is no wider than half the glass.
+            melt.rims[shape] = std::max(std::min({region.glassRimWidth, body.rect.width() / 2,
+                                                  body.rect.height() / 2}),
+                                        1.0f);
+            melt.alphas[shape] = region.alpha;
+            melt.frosts[shape] = getGlassFrost(region);
+            const auto& overDark = region.glassTintOverDark;
+            const auto& overLight = region.glassTintOverLight;
+            melt.tintsOverDark[shape] = {overDark[0], overDark[1], overDark[2], overDark[3]};
+            melt.tintsOverLight[shape] = {overLight[0], overLight[1], overLight[2], overLight[3]};
+            // What isn't each piece's own is the first's
+            if (shape == 0) {
+                melt.bend = region.glassBend;
+                melt.rimLight = region.glassRimLight;
+                melt.dispersion = region.glassDispersion;
+                melt.adaptPoint = region.glassAdaptPoint;
+            }
+            melt.shadow = std::max(melt.shadow, region.glassShadow);
+            melt.size = std::max(melt.size, body.melt);
+            melt.movingLight = melt.movingLight || body.movingLight;
+            melt.regions |= body.regions;
+            melt.area.join(body.rect);
+        }
+        const float bulge = melt.size * kGlassMeltBulge + 2.0f;
+        melt.area.outset(bulge, bulge);
+        melts.melted |= melt.regions;
+        melts.melts.push_back(melt);
+    }
+    return melts;
+}
+
 void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions,
-                                  const vec2& light) {
+                                  const GlassMelts& melts, const vec2& light) {
     if (!canDrawGlass()) {
         return;
     }
@@ -452,9 +794,31 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     // The layer's one shadow falls in the usual light while all its glass has a fixed light.
     bool movingLight = false;
     SkRect area = SkRect::MakeEmpty();
-    for (const BlurRegion& region : regions) {
+
+    // What melts comes first, for the shadow to follow its melted outline.
+    float meltSize = 0.0f;
+    for (const GlassMelt& melt : melts.melts) {
+        if (melt.shadow <= 0.0f) {
+            continue;
+        }
+        for (size_t shape = 0; shape < melt.count && count < kGlassShadowMaxShapes; shape++) {
+            bounds[count] = melt.bounds[shape];
+            radii[count] = melt.radii[shape];
+            count++;
+            strength = std::max(strength, melt.shadow * melt.alphas[shape]);
+            rimWidth = std::max(rimWidth, melt.rims[shape]);
+        }
+        movingLight = movingLight || melt.movingLight;
+        meltSize = std::max(meltSize, melt.size);
+        area.join(melt.area);
+    }
+    const size_t meltCount = count;
+
+    for (size_t i = 0; i < regions.size(); i++) {
+        const BlurRegion& region = regions[i];
         // Regions without a blur radius aren't drawn, so they cast no shadow either.
-        if (!region.isGlass() || region.blurRadius == 0 || region.glassShadow <= 0.0f) {
+        if (!region.isGlass() || region.blurRadius == 0 || region.glassShadow <= 0.0f ||
+            melts.contains(i)) {
             continue;
         }
         if (count == kGlassShadowMaxShapes) {
@@ -477,13 +841,17 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     const float drop = rimWidth * kGlassShadowDrop;
     area.outset(1.5f * softness + drop, 1.5f * softness + drop);
 
-    SkRuntimeShaderBuilder builder(mGlassShadowEffect);
+    SkRuntimeShaderBuilder builder(meltCount > 0 ? mGlassMeltShadowEffect : mGlassShadowEffect);
     builder.uniform("shapeBounds").set(bounds.data(), kGlassShadowMaxShapes);
     builder.uniform("cornerRadii").set(radii.data(), kGlassShadowMaxShapes);
     builder.uniform("shapeCount") = static_cast<float>(count);
     builder.uniform("softness") = softness;
     builder.uniform("drop") = getGlassLight(movingLight ? light : vec2(0.f, 0.f)).shadowDrop(drop);
     builder.uniform("strength") = strength;
+    if (meltCount > 0) {
+        builder.uniform("meltCount") = static_cast<float>(meltCount);
+        builder.uniform("meltSize") = meltSize;
+    }
     // Without its shader the paint would fill the whole area black.
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
@@ -520,12 +888,6 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     }
     inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
 
-    // Like plain blur, small radii fade toward the sharp content.
-    float frost = region.glassFrost;
-    if (region.blurRadius < mMaxCrossFadeRadius) {
-        frost *= region.blurRadius / mMaxCrossFadeRadius;
-    }
-
     SkRuntimeShaderBuilder builder(mGlassEffect);
     builder.child("blurredInput") =
             blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
@@ -537,7 +899,7 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     builder.uniform("cornerRadii") = shape.radii;
     builder.uniform("rimWidth") = rimWidth;
     builder.uniform("bend") = region.glassBend;
-    builder.uniform("frost") = frost;
+    builder.uniform("frost") = getGlassFrost(region);
     builder.uniform("rimLight") = region.glassRimLight;
     builder.uniform("dispersion") = region.glassDispersion;
     builder.uniform("shadow") = region.glassShadow;
@@ -566,6 +928,64 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     paint.setAntiAlias(true);
     paint.setShader(std::move(shader));
     canvas->drawRRect(outline, paint);
+}
+
+void BlurFilter::drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const vec2& light,
+                               const SkRect& blurRect, sk_sp<SkImage> blurredImage,
+                               sk_sp<SkImage> input, SkIPoint inputOrigin) {
+    // Glass always has its input, and melts only once its effects are built
+    if (!mGlassMeltEffect || !input) {
+        return;
+    }
+    SFTRACE_CALL();
+
+    SkSamplingOptions linearSampling(SkFilterMode::kLinear, SkMipmapMode::kNone);
+    const auto blurMatrix = getShaderTransform(canvas, blurRect, kInverseInputScale, 1.0f);
+    // For sampling Skia's API expects the inverse of what logically seems appropriate, as in
+    // drawBlurRegion().
+    SkMatrix inputMatrix;
+    if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
+        ALOGE("matrix was unable to be inverted");
+    }
+    inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
+
+    SkRuntimeShaderBuilder builder(mGlassMeltEffect);
+    builder.child("blurredInput") =
+            blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
+                                     &blurMatrix);
+    builder.child("originalInput") =
+            input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
+                              inputMatrix);
+    builder.uniform("shapeBounds").set(melt.bounds.data(), GlassMelt::kMaxShapes);
+    builder.uniform("cornerRadii").set(melt.radii.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeRims").set(melt.rims.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeAlphas").set(melt.alphas.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeFrosts").set(melt.frosts.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeTintsOverDark").set(melt.tintsOverDark.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeTintsOverLight").set(melt.tintsOverLight.data(), GlassMelt::kMaxShapes);
+    builder.uniform("shapeCount") = static_cast<float>(melt.count);
+    builder.uniform("meltSize") = melt.size;
+    builder.uniform("bend") = melt.bend;
+    builder.uniform("rimLight") = melt.rimLight;
+    builder.uniform("dispersion") = melt.dispersion;
+    builder.uniform("shadow") = melt.shadow;
+    // Glass with a fixed light keeps the usual one, (0, 0)
+    const GlassLight glassLight = getGlassLight(melt.movingLight ? light : vec2(0.f, 0.f));
+    builder.uniform("shadowSoftnessInRims") = kGlassShadowSoftness;
+    builder.uniform("shadowDropInRims") = glassLight.shadowDrop(kGlassShadowDrop);
+    builder.uniform("lightDir") = glassLight.direction;
+    builder.uniform("lightTurn") = glassLight.turn;
+    builder.uniform("adaptPoint") = melt.adaptPoint;
+    sk_sp<SkShader> shader = builder.makeShader();
+    if (!shader) {
+        ALOGE("Catalyxx melted glass could not be made");
+        return;
+    }
+
+    // It draws its own edge, with what it covers of each pixel
+    SkPaint paint;
+    paint.setShader(std::move(shader));
+    canvas->drawRect(melt.area, paint);
 }
 
 } // namespace skia

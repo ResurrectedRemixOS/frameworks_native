@@ -18,12 +18,14 @@
 
 #include <SkCanvas.h>
 #include <SkImage.h>
+#include <SkM44.h>
 #include <SkRRect.h>
 #include <SkRuntimeEffect.h>
 #include <SkSurface.h>
 #include <math/vec2.h>
 #include <ui/BlurRegion.h>
 
+#include <array>
 #include <vector>
 
 #include "../compat/SkiaGpuContext.h"
@@ -78,6 +80,58 @@ public:
     // case glass regions are drawn as plain blur.
     bool canDrawGlass() const { return mGlassEffect && mGlassShadowEffect; }
 
+    // How far melted glass can bulge past the pieces' own outlines, as a share of the size it melts
+    // at: as the cubic smooth minimum in its shader goes.
+    static constexpr float kGlassMeltBulge = 1.0f / 6.0f;
+
+    /**
+     * Catalyxx glass of a layer that melts together (BlurRegion::glassMelt), drawn as one surface
+     * from its pieces. Whatever isn't each piece's own is the first's.
+     */
+    struct GlassMelt {
+        static constexpr size_t kMaxShapes = 4;
+
+        // Left, top, right, bottom.
+        std::array<SkV4, kMaxShapes> bounds{};
+        // Top-left, top-right, bottom-right, bottom-left, as circles.
+        std::array<SkV4, kMaxShapes> radii{};
+        std::array<float, kMaxShapes> rims{};
+        std::array<float, kMaxShapes> alphas{};
+        std::array<float, kMaxShapes> frosts{};
+        std::array<SkV4, kMaxShapes> tintsOverDark{};
+        std::array<SkV4, kMaxShapes> tintsOverLight{};
+        size_t count = 0;
+        // How close the pieces start to reach for each other
+        float size = 0.f;
+        float bend = 0.f;
+        float rimLight = 0.f;
+        float dispersion = 0.f;
+        float shadow = 0.f;
+        float adaptPoint = 0.f;
+        bool movingLight = false;
+        // All it can cover
+        SkRect area = SkRect::MakeEmpty();
+        // Bit i: it draws region i of the layer
+        uint64_t regions = 0;
+    };
+
+    /** All the glass of a layer that melts together, from findGlassMelts(). */
+    struct GlassMelts {
+        std::vector<GlassMelt> melts;
+        // Bit i: region i of the layer is drawn by one of the melts
+        uint64_t melted = 0;
+
+        bool contains(size_t region) const {
+            return region < sizeof(melted) * 8 && (melted >> region) & 1;
+        }
+    };
+
+    /**
+     * Which of a layer's glass regions melt together now: those where one has a glassMelt and
+     * others are within it. The rest are drawn each on their own.
+     */
+    GlassMelts findGlassMelts(const std::vector<BlurRegion>& regions);
+
     // The outline a glass region is drawn in: the region's rounded rect with square corners
     // next to its joined sides, so neighbouring pieces meet without a gap.
     static SkRRect getGlassRRect(const BlurRegion& region);
@@ -85,10 +139,11 @@ public:
     /**
      * Draw one soft shadow around all the glass regions in the list, before any of them is
      * drawn. Pieces that touch or overlap share one shadow, which falls away from the light.
+     * @param melts what melts together among them
      * @param light where the light comes from, as DisplaySettings::glassLight
      */
     void drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion>& regions,
-                          const vec2& light);
+                          const GlassMelts& melts, const vec2& light);
 
     /**
      * Draw a glass region: its rim bends in the content just past the edge and catches the
@@ -104,12 +159,26 @@ public:
                          const SkRect& blurRect, sk_sp<SkImage> blurredImage,
                          sk_sp<SkImage> input, SkIPoint inputOrigin = SkIPoint::Make(0, 0));
 
+    /**
+     * Draw glass that melts together as one surface, as drawGlassRegion() draws one piece.
+     */
+    void drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const vec2& light,
+                       const SkRect& blurRect, sk_sp<SkImage> blurredImage, sk_sp<SkImage> input,
+                       SkIPoint inputOrigin = SkIPoint::Make(0, 0));
+
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {
         return true;
     }
 
 private:
+    // How much of a glass region's flat middle is blurred, as far as its blur radius goes.
+    float getGlassFrost(const BlurRegion& region) const;
+
+    // Builds the effects for glass that melts together, the first time any does. False if they
+    // failed to build: the glass then stays apart.
+    bool buildGlassMeltEffects();
+
     // To avoid downscaling artifacts, we interpolate the blurred fbo with the full composited
     // image, up to this radius.
     const float mMaxCrossFadeRadius;
@@ -121,6 +190,9 @@ private:
     // are fatal: if these fail, glass falls back to plain blur.
     sk_sp<SkRuntimeEffect> mGlassEffect;
     sk_sp<SkRuntimeEffect> mGlassShadowEffect;
+    sk_sp<SkRuntimeEffect> mGlassMeltEffect;
+    sk_sp<SkRuntimeEffect> mGlassMeltShadowEffect;
+    bool mGlassMeltFailed = false;
 };
 
 } // namespace skia
