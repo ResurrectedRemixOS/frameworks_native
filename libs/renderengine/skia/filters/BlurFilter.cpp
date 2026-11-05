@@ -767,7 +767,9 @@ BlurFilter::GlassMelts BlurFilter::findGlassMelts(const std::vector<BlurRegion>&
             }
             melt.shadow = std::max(melt.shadow, region.glassShadow);
             melt.size = std::max(melt.size, body.melt);
-            melt.movingLight = melt.movingLight || body.movingLight;
+            // One light for all of it. What keeps a fixed light, such as the dock, stays where it
+            // is while things melt into it, and its light mustn't jump for it.
+            melt.movingLight = (shape == 0 || melt.movingLight) && body.movingLight;
             melt.regions |= body.regions;
             melt.area.join(body.rect);
         }
