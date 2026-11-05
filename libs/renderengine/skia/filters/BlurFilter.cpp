@@ -251,13 +251,15 @@ static const char kGlassBodyPart[] = R"(
 
         // The rim pulls in the content past the edge, its outer part the most.
         float2 offset = normal * (bend * rimWidth * edge * edge * sqrt(edge));
-        // Blue bends further than red.
-        float3 sharp = float3(originalInput.eval(p + offset * (1.0 - 0.5 * dispersion)).r,
-                              originalInput.eval(p + offset).g,
-                              originalInput.eval(p + offset * (1.0 + 0.5 * dispersion)).b);
-        float3 blurred = blurredInput.eval(p + offset).rgb;
-        // The middle is as frosted as asked; the rim stays clear so its bend shows.
-        float3 color = mix(sharp, blurred, frost * smoothstep(0.0, 1.0, 1.0 - edge));
+        // Frost goes right up to the edge, where the bend only moves the blur around.
+        float3 color = blurredInput.eval(p + offset).rgb;
+        if (frost < 1.0) {
+            // Blue bends further than red.
+            float3 sharp = float3(originalInput.eval(p + offset * (1.0 - 0.5 * dispersion)).r,
+                                  originalInput.eval(p + offset).g,
+                                  originalInput.eval(p + offset * (1.0 + 0.5 * dispersion)).b);
+            color = mix(sharp, color, frost);
+        }
         color *= 1.0 - shadowAt(p + offset, rimWidth);
         color = mix(color, tint.rgb, tint.a);
 
