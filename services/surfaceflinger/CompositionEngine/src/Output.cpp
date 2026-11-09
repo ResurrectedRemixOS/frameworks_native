@@ -51,7 +51,6 @@
 
 #include <renderengine/DisplaySettings.h>
 #include <renderengine/RenderEngine.h>
-#include <renderengine/RrGlass.h>
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
 #pragma clang diagnostic pop // ignored "-Wconversion"
@@ -1528,7 +1527,6 @@ renderengine::DisplaySettings Output::generateClientCompositionDisplaySettings(
 
     renderengine::DisplaySettings clientCompositionDisplay;
     clientCompositionDisplay.namePlusId = mNamePlusId;
-    clientCompositionDisplay.glassLightSerial = renderengine::rrglass::lightSerial();
     clientCompositionDisplay.physicalDisplay = outputState.framebufferSpace.getContent();
     clientCompositionDisplay.clip = outputState.layerStackSpace.getContent();
     clientCompositionDisplay.orientation =
