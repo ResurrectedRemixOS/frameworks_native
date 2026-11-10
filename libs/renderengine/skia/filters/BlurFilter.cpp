@@ -69,6 +69,17 @@ static const char kGlassCommonPart[] = R"(
     // The brightness of what's behind (0 to 1) around which the glass turns from its color over
     // dark content to its color over light content; 0 keeps the first everywhere.
     uniform float adaptPoint;
+    // RR's lens edge, 0 to 1: how clear the rim of frosted glass stays. Above 0 the rim bends
+    // what's under the glass out to its edge, not what's past the edge in.
+    uniform float lensEdge;
+    // 1 for glass that shows what's behind it a little richer in color, as RR's does; else 0.
+    uniform float rich;
+
+    float3 richer(float3 color) {
+        float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+        float3 vivid = (float3(luma) + (color - float3(luma)) * 1.2) * 1.03;
+        return mix(color, clamp(vivid, float3(0.0), float3(1.0)), rich);
+    }
 
     // Signed distance to a rounded rect's outline (negative inside) and the outward normal.
     // Corner radii: top-left, top-right, bottom-right, bottom-left.
@@ -243,23 +254,28 @@ static const char kGlassBodyPart[] = R"(
             float3 middle = frost >= 1.0 ? blurredInput.eval(p).rgb
                           : frost <= 0.0 ? originalInput.eval(p).rgb
                           : mix(originalInput.eval(p).rgb, blurredInput.eval(p).rgb, frost);
-            return half4(half3(mix(middle, tint.rgb, tint.a)) * cover, cover);
+            return half4(half3(mix(richer(middle), tint.rgb, tint.a)) * cover, cover);
         }
 
         // 1 on the very edge, 0 where the rim meets the flat middle.
         float edge = 1.0 - clamp(depth / rimWidth, 0.0, 1.0);
 
-        // The rim pulls in the content past the edge, its outer part the most.
-        float2 offset = normal * (bend * rimWidth * edge * edge * sqrt(edge));
-        // Frost goes right up to the edge, where the bend only moves the blur around.
+        // The rim pulls in the content past the edge, its outer part the most. RR's lens edge
+        // pulls what's under the glass out to the edge instead.
+        float2 offset = normal * (bend * rimWidth * edge * edge * sqrt(edge)) *
+                        (lensEdge > 0.0 ? -1.0 : 1.0);
+        // Frost goes right up to the edge, where the bend only moves the blur around. RR's lens
+        // edge keeps the outer part of the rim clear, so its bend shows around the frost.
         float3 color = blurredInput.eval(p + offset).rgb;
-        if (frost < 1.0) {
+        float clearness = max(1.0 - frost, lensEdge * 0.8 * smoothstep(0.35, 1.0, edge));
+        if (clearness > 0.0) {
             // Blue bends further than red.
             float3 sharp = float3(originalInput.eval(p + offset * (1.0 - 0.5 * dispersion)).r,
                                   originalInput.eval(p + offset).g,
                                   originalInput.eval(p + offset * (1.0 + 0.5 * dispersion)).b);
-            color = mix(sharp, color, frost);
+            color = mix(color, sharp, clearness);
         }
+        color = richer(color);
         color *= 1.0 - shadowAt(p + offset, rimWidth);
         color = mix(color, tint.rgb, tint.a);
 
@@ -619,6 +635,19 @@ float BlurFilter::getGlassFrost(const BlurRegion& region) const {
     return frost;
 }
 
+float BlurFilter::getGlassLensEdge(bool lensEdge, uint32_t layerBlurRadius) const {
+    if (!lensEdge) {
+        return 0.0f;
+    }
+    if (layerBlurRadius == 0) {
+        return 1.0f;
+    }
+    if (mMaxCrossFadeRadius <= 0.0f) {
+        return 0.0f;
+    }
+    return 1.0f - std::min(layerBlurRadius / mMaxCrossFadeRadius, 1.0f);
+}
+
 BlurFilter::GlassMelts BlurFilter::findGlassMelts(const std::vector<BlurRegion>& regions) {
     GlassMelts melts;
     // Nearly always, nothing melts
@@ -766,6 +795,7 @@ BlurFilter::GlassMelts BlurFilter::findGlassMelts(const std::vector<BlurRegion>&
                 melt.rimLight = region.glassRimLight;
                 melt.dispersion = region.glassDispersion;
                 melt.adaptPoint = region.glassAdaptPoint;
+                melt.lensEdge = region.glassJoinedSides & BlurRegion::kGlassLensEdge;
             }
             melt.shadow = std::max(melt.shadow, region.glassShadow);
             melt.size = std::max(melt.size, body.melt);
@@ -870,7 +900,8 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
 
 void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
                                  const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                                 sk_sp<SkImage> input, SkIPoint inputOrigin) {
+                                 sk_sp<SkImage> input, SkIPoint inputOrigin,
+                                 uint32_t layerBlurRadius) {
     if (!canDrawGlass() || !input) {
         drawBlurRegion(canvas, getGlassRRect(region), region.blurRadius, 1.0f, region.alpha,
                        blurRect, blurredImage, input, inputOrigin);
@@ -918,6 +949,9 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
     builder.uniform("tintOverDark") = SkV4{overDark[0], overDark[1], overDark[2], overDark[3]};
     builder.uniform("tintOverLight") = SkV4{overLight[0], overLight[1], overLight[2], overLight[3]};
     builder.uniform("adaptPoint") = region.glassAdaptPoint;
+    const bool lensEdge = region.glassJoinedSides & BlurRegion::kGlassLensEdge;
+    builder.uniform("lensEdge") = getGlassLensEdge(lensEdge, layerBlurRadius);
+    builder.uniform("rich") = lensEdge ? 1.0f : 0.0f;
     // Without its shader the paint would fill the glass black, so draw plain blur instead.
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
@@ -936,7 +970,8 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
 
 void BlurFilter::drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const vec2& light,
                                const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                               sk_sp<SkImage> input, SkIPoint inputOrigin) {
+                               sk_sp<SkImage> input, SkIPoint inputOrigin,
+                               uint32_t layerBlurRadius) {
     // Glass always has its input, and melts only once its effects are built
     if (!mGlassMeltEffect || !input) {
         return;
@@ -980,6 +1015,8 @@ void BlurFilter::drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const ve
     builder.uniform("lightDir") = glassLight.direction;
     builder.uniform("lightTurn") = glassLight.turn;
     builder.uniform("adaptPoint") = melt.adaptPoint;
+    builder.uniform("lensEdge") = getGlassLensEdge(melt.lensEdge, layerBlurRadius);
+    builder.uniform("rich") = melt.lensEdge ? 1.0f : 0.0f;
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
         ALOGE("Catalyxx melted glass could not be made");

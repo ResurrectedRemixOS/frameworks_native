@@ -109,6 +109,8 @@ public:
         float shadow = 0.f;
         float adaptPoint = 0.f;
         bool movingLight = false;
+        // BlurRegion::kGlassLensEdge
+        bool lensEdge = false;
         // All it can cover
         SkRect area = SkRect::MakeEmpty();
         // Bit i: it draws region i of the layer
@@ -154,17 +156,20 @@ public:
      * @param input original unblurred input, which the rim bends
      * @param inputOrigin where input's top left corner is in device coordinates, as for
      *                    drawBlurRegion()
+     * @param layerBlurRadius the background blur radius of the region's layer, which leaves
+     *                        RR's lens edge (BlurRegion::kGlassLensEdge) nothing sharp to bend
      */
     void drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
                          const SkRect& blurRect, sk_sp<SkImage> blurredImage,
-                         sk_sp<SkImage> input, SkIPoint inputOrigin = SkIPoint::Make(0, 0));
+                         sk_sp<SkImage> input, SkIPoint inputOrigin = SkIPoint::Make(0, 0),
+                         uint32_t layerBlurRadius = 0);
 
     /**
      * Draw glass that melts together as one surface, as drawGlassRegion() draws one piece.
      */
     void drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const vec2& light,
                        const SkRect& blurRect, sk_sp<SkImage> blurredImage, sk_sp<SkImage> input,
-                       SkIPoint inputOrigin = SkIPoint::Make(0, 0));
+                       SkIPoint inputOrigin = SkIPoint::Make(0, 0), uint32_t layerBlurRadius = 0);
 
     virtual void preallocateBuffers(SkiaGpuContext* context, ui::Size size) {}
     virtual bool areBuffersPreallocated(const SkiaGpuContext* context, ui::Size displaySize) const {
@@ -174,6 +179,11 @@ public:
 private:
     // How much of a glass region's flat middle is blurred, as far as its blur radius goes.
     float getGlassFrost(const BlurRegion& region) const;
+
+    // How clear RR's lens edge keeps the rim of frosted glass, 0 to 1, in a layer that blurs
+    // what's behind it by `layerBlurRadius`: such a layer leaves nothing sharp there to bend,
+    // so the rim frosts over as that blur comes up.
+    float getGlassLensEdge(bool lensEdge, uint32_t layerBlurRadius) const;
 
     // Builds the effects for glass that melts together, the first time any does. False if they
     // failed to build: the glass then stays apart.

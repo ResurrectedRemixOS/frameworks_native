@@ -1347,14 +1347,15 @@ void SkiaRenderEngine::drawLayersInternal(
                     }
 
                     const auto drawRegion =
-                            [this, canvas, &display, &blurRect, &blurInput,
+                            [this, canvas, &display, &layer, &blurRect, &blurInput,
                              &inputOrigin](const sk_sp<SkImage>& temporaryBlurredImage,
                                            const BlurRegion& region) {
                                 if (region.isGlass()) {
                                     mBlurFilter->drawGlassRegion(canvas, region,
                                                                  display.glassLight, blurRect,
                                                                  temporaryBlurredImage, blurInput,
-                                                                 inputOrigin);
+                                                                 inputOrigin,
+                                                                 layer.backgroundBlurRadius);
                                     return;
                                 }
                                 mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
@@ -1364,15 +1365,16 @@ void SkiaRenderEngine::drawLayersInternal(
                             };
                     // Catalyxx glass: what melts together, with this blur
                     const auto drawMelts =
-                            [this, canvas, &display, &blurRect, &blurInput, &inputOrigin, &melts,
-                             &meltRadii](const sk_sp<SkImage>& temporaryBlurredImage,
-                                         uint32_t radius) {
+                            [this, canvas, &display, &layer, &blurRect, &blurInput, &inputOrigin,
+                             &melts, &meltRadii](const sk_sp<SkImage>& temporaryBlurredImage,
+                                                 uint32_t radius) {
                                 for (size_t m = 0; m < melts.melts.size(); m++) {
                                     if (meltRadii[m] == radius) {
                                         mBlurFilter->drawGlassMelt(canvas, melts.melts[m],
                                                                    display.glassLight, blurRect,
                                                                    temporaryBlurredImage, blurInput,
-                                                                   inputOrigin);
+                                                                   inputOrigin,
+                                                                   layer.backgroundBlurRadius);
                                     }
                                 }
                             };
