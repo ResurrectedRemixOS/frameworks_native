@@ -21,6 +21,7 @@
 #include <SkM44.h>
 #include <SkPaint.h>
 #include <SkRRect.h>
+#include <SkRegion.h>
 #include <SkRuntimeEffect.h>
 #include <SkSize.h>
 #include <SkString.h>
@@ -833,7 +834,6 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
     float rimWidth = 0.0f;
     // The layer's one shadow falls in the usual light while all its glass has a fixed light.
     bool movingLight = false;
-    SkRect area = SkRect::MakeEmpty();
 
     // What melts comes first, for the shadow to follow its melted outline.
     float meltSize = 0.0f;
@@ -850,7 +850,6 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
         }
         movingLight = movingLight || melt.movingLight;
         meltSize = std::max(meltSize, melt.size);
-        area.join(melt.area);
     }
     const size_t meltCount = count;
 
@@ -872,14 +871,49 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
         movingLight = movingLight || region.hasMovingLight();
         strength = std::max(strength, region.glassShadow * region.alpha);
         rimWidth = std::max(rimWidth, getGlassRimWidth(region, outline.rect()));
-        area.join(outline.rect());
     }
     if (count == 0 || strength <= 0.0f) {
         return;
     }
     const float softness = rimWidth * kGlassShadowSoftness;
     const float drop = rimWidth * kGlassShadowDrop;
-    area.outset(1.5f * softness + drop, 1.5f * softness + drop);
+
+    // The shadow is gone a softness past where it falls, and nothing is drawn under the glass:
+    // draw only around the pieces, not all across them and what lies between.
+    const float reach = softness + drop + 1.0f;
+    SkRegion falls;
+    for (const GlassMelt& melt : melts.melts) {
+        if (melt.shadow > 0.0f) {
+            // What melts can bulge and grow necks anywhere in its area
+            falls.op(melt.area.makeOutset(reach, reach).roundOut(), SkRegion::kUnion_Op);
+        }
+    }
+    for (size_t i = meltCount; i < count; i++) {
+        falls.op(SkRect::MakeLTRB(bounds[i].x, bounds[i].y, bounds[i].z, bounds[i].w)
+                         .makeOutset(reach, reach)
+                         .roundOut(),
+                 SkRegion::kUnion_Op);
+    }
+    for (size_t i = meltCount; i < count; i++) {
+        // Between its corners a piece is glass all the way across, and all the way down
+        const SkV4& b = bounds[i];
+        const SkV4& r = radii[i];
+        const SkIRect across = SkRect::MakeLTRB(b.x + 1.0f, b.y + std::max(r.x, r.y),
+                                                b.z - 1.0f, b.w - std::max(r.z, r.w))
+                                       .roundIn();
+        const SkIRect down = SkRect::MakeLTRB(b.x + std::max(r.x, r.w), b.y + 1.0f,
+                                              b.z - std::max(r.y, r.z), b.w - 1.0f)
+                                     .roundIn();
+        if (!across.isEmpty()) {
+            falls.op(across, SkRegion::kDifference_Op);
+        }
+        if (!down.isEmpty()) {
+            falls.op(down, SkRegion::kDifference_Op);
+        }
+    }
+    if (falls.isEmpty()) {
+        return;
+    }
 
     SkRuntimeShaderBuilder builder(meltCount > 0 ? mGlassMeltShadowEffect : mGlassShadowEffect);
     builder.uniform("shapeBounds").set(bounds.data(), kGlassShadowMaxShapes);
@@ -892,7 +926,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
         builder.uniform("meltCount") = static_cast<float>(meltCount);
         builder.uniform("meltSize") = meltSize;
     }
-    // Without its shader the paint would fill the whole area black.
+    // Without its shader the paint would fill all of it black.
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
         ALOGE("Catalyxx glass shadow could not be made");
@@ -901,7 +935,7 @@ void BlurFilter::drawGlassShadows(SkCanvas* canvas, const std::vector<BlurRegion
 
     SkPaint paint;
     paint.setShader(std::move(shader));
-    canvas->drawRect(area, paint);
+    canvas->drawRegion(falls, paint);
 }
 
 void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, const vec2& light,
