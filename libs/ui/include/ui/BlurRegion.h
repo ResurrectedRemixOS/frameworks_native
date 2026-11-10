@@ -35,6 +35,9 @@ struct BlurRegion {
     // as glass that shows nearly all the time, which mustn't keep the tilt sensor running and
     // the screen being drawn again as the light moves.
     static constexpr uint32_t kGlassFixedLight = 1 << 4;
+    // Also in glassJoinedSides: RR's lens edge. Frosted glass keeps a clear rim, which bends the
+    // sharp content under the glass out to its edge, and shows colors a little richer.
+    static constexpr uint32_t kGlassLensEdge = 1 << 5;
 
     uint32_t blurRadius;
     float cornerRadiusTLX;
@@ -66,7 +69,7 @@ struct BlurRegion {
     // Darkness of the glass's shadow, 0 to 1.
     float glassShadow = 0.f;
     // kGlassSide* bits: sides where the glass carries on into another region of the
-    // same layer, so they get no rim and no shadow; and kGlassFixedLight.
+    // same layer, so they get no rim and no shadow; kGlassFixedLight and kGlassLensEdge.
     uint32_t glassJoinedSides = 0;
     // The glass's own color over dark content and over light content: straight-alpha RGBA,
     // where alpha is how much of the glass it covers.
