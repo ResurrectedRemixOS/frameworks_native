@@ -1079,9 +1079,11 @@ void SkiaRenderEngine::drawLayersInternal(
                 requiresCompositionLayer = true;
             }
             for (auto region : layer.blurRegions) {
-                // Catalyxx glass bends the sharp content too, like the crossfade.
+                // Catalyxx glass bends the sharp content too, like the crossfade, unless it only
+                // shows its blur.
                 if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
-                    (region.isGlass() && mBlurFilter->canDrawGlass())) {
+                    (region.isGlass() && mBlurFilter->canDrawGlass() &&
+                     mBlurFilter->glassReadsSharp(region, layer.backgroundBlurRadius))) {
                     requiresCompositionLayer = true;
                 }
             }
@@ -1157,15 +1159,20 @@ void SkiaRenderEngine::drawLayersInternal(
         // Where blurInput's top left corner is on the display: it may hold only the part of the
         // display this layer's blur reads.
         SkIPoint inputOrigin = SkIPoint::Make(0, 0);
+        // Catalyxx glass: whether blurInput can be read while this layer is drawn: it's a copy
+        // or another surface, not the surface being drawn to
+        bool canReadInput = false;
         if (backdropLayer == &layer && backdropImage) {
             blurInput = backdropImage;
             inputOrigin = SkIPoint::Make(backdropBounds.fLeft, backdropBounds.fTop);
+            canReadInput = true;
         }
         if (blurCompositionLayer == &layer) {
             LOG_THREAD_STATE_AND_CRASH_IF(activeSurface == dstSurface);
             LOG_THREAD_STATE_AND_CRASH_IF(canvas == dstCanvas);
 
             blurInput = activeSurface->makeTemporaryImage();
+            canReadInput = true;
 
             // blit the offscreen framebuffer into the destination AHB. This ensures that
             // even if the blurred image does not cover the screen (for example, during
@@ -1266,10 +1273,12 @@ void SkiaRenderEngine::drawLayersInternal(
                     }
                     for (auto region : layer.blurRegions) {
                         if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
-                            (region.isGlass() && mBlurFilter->canDrawGlass())) {
+                            (region.isGlass() && mBlurFilter->canDrawGlass() &&
+                             mBlurFilter->glassReadsSharp(region, layer.backgroundBlurRadius))) {
                             requiresCrossFadeWithBlurInput = true;
                         }
                     }
+                    canReadInput = requiresCrossFadeWithBlurInput;
                     if (requiresCrossFadeWithBlurInput) {
                         // If we require cross fading with the blur input, we need to make sure we
                         // make a copy of the surface to the image since we will be writing to the
@@ -1313,9 +1322,14 @@ void SkiaRenderEngine::drawLayersInternal(
                     // most blurred of its pieces asks for.
                     const auto melts = mBlurFilter->findGlassMelts(layer.blurRegions);
 
-                    // Catalyxx glass: one shadow goes under all of the layer's glass.
-                    mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, melts,
-                                                  display.glassLight);
+                    // Catalyxx glass: one shadow goes under all of the layer's glass. Where the
+                    // glass blurs the display itself, not a copy of it, the shadow waits until
+                    // the glass is drawn, or the glass would blur it in at its edges; none of it
+                    // falls under the glass either way.
+                    if (canReadInput) {
+                        mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, melts,
+                                                      display.glassLight);
+                    }
 
                     // Clustering regions by blur radius allows regions with a shared blur radius to
                     // reuse the same result from generateTemporaryImage(...). The exact order does
@@ -1346,14 +1360,17 @@ void SkiaRenderEngine::drawLayersInternal(
                         regionsPerRadius.try_emplace(radius, BlurRegionList());
                     }
 
+                    // Catalyxx glass: the sharp content, where it can be read. Glass that needs
+                    // it had it copied; the rest only shows its blur.
+                    const sk_sp<SkImage> glassInput = canReadInput ? blurInput : nullptr;
                     const auto drawRegion =
-                            [this, canvas, &display, &layer, &blurRect, &blurInput,
+                            [this, canvas, &display, &layer, &blurRect, &blurInput, &glassInput,
                              &inputOrigin](const sk_sp<SkImage>& temporaryBlurredImage,
                                            const BlurRegion& region) {
                                 if (region.isGlass()) {
                                     mBlurFilter->drawGlassRegion(canvas, region,
                                                                  display.glassLight, blurRect,
-                                                                 temporaryBlurredImage, blurInput,
+                                                                 temporaryBlurredImage, glassInput,
                                                                  inputOrigin,
                                                                  layer.backgroundBlurRadius);
                                     return;
@@ -1365,15 +1382,15 @@ void SkiaRenderEngine::drawLayersInternal(
                             };
                     // Catalyxx glass: what melts together, with this blur
                     const auto drawMelts =
-                            [this, canvas, &display, &layer, &blurRect, &blurInput, &inputOrigin,
+                            [this, canvas, &display, &layer, &blurRect, &glassInput, &inputOrigin,
                              &melts, &meltRadii](const sk_sp<SkImage>& temporaryBlurredImage,
                                                  uint32_t radius) {
                                 for (size_t m = 0; m < melts.melts.size(); m++) {
                                     if (meltRadii[m] == radius) {
                                         mBlurFilter->drawGlassMelt(canvas, melts.melts[m],
                                                                    display.glassLight, blurRect,
-                                                                   temporaryBlurredImage, blurInput,
-                                                                   inputOrigin,
+                                                                   temporaryBlurredImage,
+                                                                   glassInput, inputOrigin,
                                                                    layer.backgroundBlurRadius);
                                     }
                                 }
@@ -1403,6 +1420,10 @@ void SkiaRenderEngine::drawLayersInternal(
                             drawRegion(temporaryBlurredImage, region);
                         }
                         drawMelts(temporaryBlurredImage, radius);
+                    }
+                    if (!canReadInput) {
+                        mBlurFilter->drawGlassShadows(canvas, layer.blurRegions, melts,
+                                                      display.glassLight);
                     }
                 }
 

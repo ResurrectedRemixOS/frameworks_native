@@ -80,6 +80,11 @@ public:
     // case glass regions are drawn as plain blur.
     bool canDrawGlass() const { return mGlassEffect && mGlassShadowEffect; }
 
+    // Whether a glass region shows any of what's behind it sharp, in a layer that blurs what's
+    // behind it by `layerBlurRadius`: its middle or its rim is clear. Glass that only shows its
+    // blur is drawn without the sharp input, so the display needn't be copied for it.
+    bool glassReadsSharp(const BlurRegion& region, uint32_t layerBlurRadius) const;
+
     // How far melted glass can bulge past the pieces' own outlines, as a share of the size it melts
     // at: as the cubic smooth minimum in its shader goes.
     static constexpr float kGlassMeltBulge = 1.0f / 6.0f;
@@ -153,7 +158,8 @@ public:
      * @param light where the light comes from, as DisplaySettings::glassLight
      * @param blurRect bounds of the blurredImage translated into canvas coordinates
      * @param blurredImage down-sampled blurred content that was produced by the generate() method
-     * @param input original unblurred input, which the rim bends
+     * @param input original unblurred input, which the rim bends; may be null for glass that
+     *              only shows its blur (glassReadsSharp())
      * @param inputOrigin where input's top left corner is in device coordinates, as for
      *                    drawBlurRegion()
      * @param layerBlurRadius the background blur radius of the region's layer, which leaves

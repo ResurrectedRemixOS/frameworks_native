@@ -648,6 +648,12 @@ float BlurFilter::getGlassLensEdge(bool lensEdge, uint32_t layerBlurRadius) cons
     return 1.0f - std::min(layerBlurRadius / mMaxCrossFadeRadius, 1.0f);
 }
 
+bool BlurFilter::glassReadsSharp(const BlurRegion& region, uint32_t layerBlurRadius) const {
+    return getGlassFrost(region) < 1.0f ||
+            getGlassLensEdge(region.glassJoinedSides & BlurRegion::kGlassLensEdge,
+                             layerBlurRadius) > 0.0f;
+}
+
 BlurFilter::GlassMelts BlurFilter::findGlassMelts(const std::vector<BlurRegion>& regions) {
     GlassMelts melts;
     // Nearly always, nothing melts
@@ -902,7 +908,7 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
                                  const SkRect& blurRect, sk_sp<SkImage> blurredImage,
                                  sk_sp<SkImage> input, SkIPoint inputOrigin,
                                  uint32_t layerBlurRadius) {
-    if (!canDrawGlass() || !input) {
+    if (!canDrawGlass() || (!input && glassReadsSharp(region, layerBlurRadius))) {
         drawBlurRegion(canvas, getGlassRRect(region), region.blurRadius, 1.0f, region.alpha,
                        blurRect, blurredImage, input, inputOrigin);
         return;
@@ -915,21 +921,26 @@ void BlurFilter::drawGlassRegion(SkCanvas* canvas, const BlurRegion& region, con
 
     SkSamplingOptions linearSampling(SkFilterMode::kLinear, SkMipmapMode::kNone);
     const auto blurMatrix = getShaderTransform(canvas, blurRect, kInverseInputScale, 1.0f);
-    // For sampling Skia's API expects the inverse of what logically seems appropriate, as in
-    // drawBlurRegion().
-    SkMatrix inputMatrix;
-    if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
-        ALOGE("matrix was unable to be inverted");
-    }
-    inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
+    const auto blurShader = blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror,
+                                                     linearSampling, &blurMatrix);
 
     SkRuntimeShaderBuilder builder(mGlassEffect);
-    builder.child("blurredInput") =
-            blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
-                                     &blurMatrix);
-    builder.child("originalInput") =
-            input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
-                              inputMatrix);
+    builder.child("blurredInput") = blurShader;
+    if (input) {
+        // For sampling Skia's API expects the inverse of what logically seems appropriate, as in
+        // drawBlurRegion().
+        SkMatrix inputMatrix;
+        if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
+            ALOGE("matrix was unable to be inverted");
+        }
+        inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
+        builder.child("originalInput") =
+                input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
+                                  inputMatrix);
+    } else {
+        // Glass that only shows its blur never reads the sharp content
+        builder.child("originalInput") = blurShader;
+    }
     builder.uniform("shapeBounds") = shape.bounds;
     builder.uniform("cornerRadii") = shape.radii;
     builder.uniform("rimWidth") = rimWidth;
@@ -972,29 +983,44 @@ void BlurFilter::drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const ve
                                const SkRect& blurRect, sk_sp<SkImage> blurredImage,
                                sk_sp<SkImage> input, SkIPoint inputOrigin,
                                uint32_t layerBlurRadius) {
-    // Glass always has its input, and melts only once its effects are built
-    if (!mGlassMeltEffect || !input) {
+    // Glass melts only once its effects are built
+    if (!mGlassMeltEffect) {
         return;
+    }
+    const float lensEdge = getGlassLensEdge(melt.lensEdge, layerBlurRadius);
+    if (!input) {
+        // Without the sharp input only glass that shows nothing but its blur can be drawn
+        bool readsSharp = lensEdge > 0.0f;
+        for (size_t shape = 0; shape < melt.count; shape++) {
+            readsSharp = readsSharp || melt.frosts[shape] < 1.0f;
+        }
+        if (readsSharp) {
+            return;
+        }
     }
     SFTRACE_CALL();
 
     SkSamplingOptions linearSampling(SkFilterMode::kLinear, SkMipmapMode::kNone);
     const auto blurMatrix = getShaderTransform(canvas, blurRect, kInverseInputScale, 1.0f);
-    // For sampling Skia's API expects the inverse of what logically seems appropriate, as in
-    // drawBlurRegion().
-    SkMatrix inputMatrix;
-    if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
-        ALOGE("matrix was unable to be inverted");
-    }
-    inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
+    const auto blurShader = blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror,
+                                                     linearSampling, &blurMatrix);
 
     SkRuntimeShaderBuilder builder(mGlassMeltEffect);
-    builder.child("blurredInput") =
-            blurredImage->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
-                                     &blurMatrix);
-    builder.child("originalInput") =
-            input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
-                              inputMatrix);
+    builder.child("blurredInput") = blurShader;
+    if (input) {
+        // For sampling Skia's API expects the inverse of what logically seems appropriate, as in
+        // drawBlurRegion().
+        SkMatrix inputMatrix;
+        if (!canvas->getTotalMatrix().invert(&inputMatrix)) {
+            ALOGE("matrix was unable to be inverted");
+        }
+        inputMatrix.preTranslate(inputOrigin.fX, inputOrigin.fY);
+        builder.child("originalInput") =
+                input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror, linearSampling,
+                                  inputMatrix);
+    } else {
+        builder.child("originalInput") = blurShader;
+    }
     builder.uniform("shapeBounds").set(melt.bounds.data(), GlassMelt::kMaxShapes);
     builder.uniform("cornerRadii").set(melt.radii.data(), GlassMelt::kMaxShapes);
     builder.uniform("shapeRims").set(melt.rims.data(), GlassMelt::kMaxShapes);
@@ -1015,7 +1041,7 @@ void BlurFilter::drawGlassMelt(SkCanvas* canvas, const GlassMelt& melt, const ve
     builder.uniform("lightDir") = glassLight.direction;
     builder.uniform("lightTurn") = glassLight.turn;
     builder.uniform("adaptPoint") = melt.adaptPoint;
-    builder.uniform("lensEdge") = getGlassLensEdge(melt.lensEdge, layerBlurRadius);
+    builder.uniform("lensEdge") = lensEdge;
     builder.uniform("rich") = melt.lensEdge ? 1.0f : 0.0f;
     sk_sp<SkShader> shader = builder.makeShader();
     if (!shader) {
