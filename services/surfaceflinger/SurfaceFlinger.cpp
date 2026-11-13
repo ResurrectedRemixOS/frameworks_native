@@ -7421,16 +7421,25 @@ status_t SurfaceFlinger::setGlassLight(const Parcel& data, Parcel* reply) {
         light = vec2(x / length, y / length);
     }
 
+    // A smaller turn of the light than this (radians) isn't drawn: the gravity sensor's noise
+    // moves it that much on a phone held still. Turns add up from the light last drawn.
+    constexpr float kMinGlassLightTurn = 0.01f;
+
     bool changed = false;
     {
         std::scoped_lock lock(mGlassLightLock);
-        changed = mGlassLight != light;
-        mGlassLight = light;
+        // Between two directions this is about the angle; from or to the usual light it's 1.
+        changed = std::hypot(light.x - mGlassLight.x, light.y - mGlassLight.y) >=
+                kMinGlassLightTurn;
+        if (changed) {
+            mGlassLight = light;
+        }
     }
     const bool onScreen = mGlassOnScreen;
     if (changed && onScreen) {
-        // A still screen only shows the new light once it's composited again.
-        scheduleComposite(FrameHint::kActive);
+        // A still screen only shows the new light once it's composited again. A tilt isn't
+        // user activity, so it doesn't reset the idle timers.
+        scheduleComposite(FrameHint::kNone);
     }
     return reply ? reply->writeBool(onScreen) : NO_ERROR;
 }
