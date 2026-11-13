@@ -96,10 +96,8 @@ status_t oplusFusionActivate(int handle, int enabled) {
               ret3e9, ret3f0, enabled, handle);
         return (ret3e9 == 0 || ret3f0 == 0) ? NO_ERROR : ret3e9;
     }
-    const int ret = callVirtual<int, int, bool>(
-            gDeviceExt, kDeviceExt_activateFusionSensor, handle, enabled != 0);
-    ALOGI("fusion: activateFusionSensor(handle=0x%x, enabled=%d) -> %d", handle, enabled, ret);
-    return ret;
+    // Any other sensor: the engine only answers -ENODEV, so it isn't forwarded or logged.
+    return NO_ERROR;
 }
 
 status_t oplusFusionBatch(int handle, int64_t samplingPeriodNs, int64_t maxBatchReportLatencyNs) {
