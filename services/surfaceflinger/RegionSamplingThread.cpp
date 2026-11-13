@@ -34,6 +34,7 @@
 #include <renderengine/impl/ExternalTexture.h>
 #include <ui/DisplayStatInfo.h>
 
+#include <algorithm>
 #include <string>
 
 #include "DisplayDevice.h"
@@ -260,6 +261,50 @@ std::vector<float> RegionSamplingThread::sampleBuffer(
     return lumas;
 }
 
+// Where captureSample() renders the screen for these sampled areas, whose bounds are `bounds`.
+// Usually that's `bounds`. When most of it isn't sampled, such as between a status bar and a
+// navigation handle at opposite ends of the screen, each group of overlapping areas is rendered
+// on its own instead: a fraction of the pixels to draw and read back, from the same layers.
+static std::vector<Rect> getCaptureRects(const std::vector<Rect>& areas, const Rect& bounds) {
+    // How many times the groups' pixels the bounds must have for the groups to be rendered
+    constexpr int64_t kMinBoundsToGroupsRatio = 4;
+
+    std::vector<Rect> groups;
+    for (Rect group : areas) {
+        if (group.isEmpty()) {
+            continue;
+        }
+        for (auto it = groups.begin(); it != groups.end();) {
+            Rect overlap;
+            if (it->intersect(group, &overlap)) {
+                group = Rect(std::min(group.left, it->left), std::min(group.top, it->top),
+                             std::max(group.right, it->right), std::max(group.bottom, it->bottom));
+                groups.erase(it);
+                // The grown group may overlap one already passed
+                it = groups.begin();
+            } else {
+                ++it;
+            }
+        }
+        groups.push_back(group);
+    }
+
+    int64_t groupsArea = 0;
+    for (const Rect& group : groups) {
+        groupsArea += static_cast<int64_t>(group.getWidth()) * group.getHeight();
+    }
+    const int64_t boundsArea = static_cast<int64_t>(bounds.getWidth()) * bounds.getHeight();
+    if (boundsArea > kMinBoundsToGroupsRatio * groupsArea) {
+        return groups;
+    }
+    return {bounds};
+}
+
+static bool contains(const Rect& outer, const Rect& inner) {
+    return outer.left <= inner.left && outer.top <= inner.top && inner.right <= outer.right &&
+            inner.bottom <= outer.bottom;
+}
+
 void RegionSamplingThread::captureSample() {
     SFTRACE_CALL();
     std::lock_guard lock(mSamplingMutex);
@@ -321,48 +366,66 @@ void RegionSamplingThread::captureSample() {
                              outStopTraversal);
     };
 
-    std::shared_ptr<renderengine::ExternalTexture> buffer = nullptr;
-    if (mCachedBuffer && mCachedBuffer->getBuffer()->getWidth() == sampledBounds.getWidth() &&
-        mCachedBuffer->getBuffer()->getHeight() == sampledBounds.getHeight()) {
-        buffer = mCachedBuffer;
-    } else {
-        const uint32_t usage =
-                GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
-        sp<GraphicBuffer> graphicBuffer =
-                sp<GraphicBuffer>::make(sampledBounds.getWidth(), sampledBounds.getHeight(),
-                                        PIXEL_FORMAT_RGBA_8888, 1, usage, "RegionSamplingThread");
-        const status_t bufferStatus = graphicBuffer->initCheck();
-        LOG_ALWAYS_FATAL_IF(bufferStatus != OK, "captureSample: Buffer failed to allocate: %d",
-                            bufferStatus);
-        buffer = std::make_shared<
-                renderengine::impl::ExternalTexture>(graphicBuffer, mFlinger.getRenderEngine(),
-                                                     renderengine::impl::ExternalTexture::Usage::
-                                                             WRITEABLE);
+    std::vector<Rect> areas;
+    for (const auto& descriptor : descriptors) {
+        areas.push_back(descriptor.area);
     }
+    const std::vector<Rect> captureRects = getCaptureRects(areas, sampledBounds);
 
-    SurfaceFlinger::ScreenshotArgs
-            screenshotArgs{.captureTypeVariant = std::monostate{},
-                           .displayIdVariant = std::nullopt,
-                           .snapshotRequest =
-                                   SurfaceFlinger::SnapshotRequestArgs{.uid = gui::Uid::INVALID,
-                                                                       .snapshotFilterFn =
-                                                                               filterFn},
-                           .sourceCrop = sampledBounds,
-                           .size = sampledBounds.getSize(),
-                           .dataspace = ui::Dataspace::V0_SRGB,
-                           .disableBlur = true,
-                           .isGrayscale = false,
-                           .isSecure = true,
-                           .preserveDisplayColors = false,
-                           .debugName = "RegionSampling"};
+    // The last sample's buffers, reused for captures of the same size
+    std::vector<std::shared_ptr<renderengine::ExternalTexture>> spareBuffers = mCachedBuffers;
+    std::vector<std::shared_ptr<renderengine::ExternalTexture>> buffers;
+    for (const Rect& captureRect : captureRects) {
+        std::shared_ptr<renderengine::ExternalTexture> buffer = nullptr;
+        const auto spare =
+                std::find_if(spareBuffers.begin(), spareBuffers.end(), [&](const auto& cached) {
+                    return cached->getBuffer()->getWidth() == captureRect.getWidth() &&
+                            cached->getBuffer()->getHeight() == captureRect.getHeight();
+                });
+        if (spare != spareBuffers.end()) {
+            buffer = *spare;
+            spareBuffers.erase(spare);
+        } else {
+            const uint32_t usage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_HW_RENDER |
+                    GRALLOC_USAGE_HW_TEXTURE;
+            sp<GraphicBuffer> graphicBuffer =
+                    sp<GraphicBuffer>::make(captureRect.getWidth(), captureRect.getHeight(),
+                                            PIXEL_FORMAT_RGBA_8888, 1, usage,
+                                            "RegionSamplingThread");
+            const status_t bufferStatus = graphicBuffer->initCheck();
+            LOG_ALWAYS_FATAL_IF(bufferStatus != OK, "captureSample: Buffer failed to allocate: %d",
+                                bufferStatus);
+            buffer = std::make_shared<
+                    renderengine::impl::ExternalTexture>(graphicBuffer,
+                                                         mFlinger.getRenderEngine(),
+                                                         renderengine::impl::ExternalTexture::
+                                                                 Usage::WRITEABLE);
+        }
 
-    std::vector<std::pair<Layer*, sp<LayerFE>>> layers;
-    mFlinger.setScreenshotSnapshotsAndDisplayState(screenshotArgs,
-                                                   static_cast<ui::PixelFormat>(
-                                                           buffer->getPixelFormat()));
-    FenceResult fenceResult = mFlinger.captureScreenshot(screenshotArgs, buffer, nullptr).get();
-    if (fenceResult.ok()) {
-        fenceResult.value()->waitForever(LOG_TAG);
+        SurfaceFlinger::ScreenshotArgs
+                screenshotArgs{.captureTypeVariant = std::monostate{},
+                               .displayIdVariant = std::nullopt,
+                               .snapshotRequest =
+                                       SurfaceFlinger::SnapshotRequestArgs{.uid = gui::Uid::INVALID,
+                                                                           .snapshotFilterFn =
+                                                                                   filterFn},
+                               .sourceCrop = captureRect,
+                               .size = captureRect.getSize(),
+                               .dataspace = ui::Dataspace::V0_SRGB,
+                               .disableBlur = true,
+                               .isGrayscale = false,
+                               .isSecure = true,
+                               .preserveDisplayColors = false,
+                               .debugName = "RegionSampling"};
+
+        mFlinger.setScreenshotSnapshotsAndDisplayState(screenshotArgs,
+                                                       static_cast<ui::PixelFormat>(
+                                                               buffer->getPixelFormat()));
+        FenceResult fenceResult = mFlinger.captureScreenshot(screenshotArgs, buffer, nullptr).get();
+        if (fenceResult.ok()) {
+            fenceResult.value()->waitForever(LOG_TAG);
+        }
+        buffers.push_back(std::move(buffer));
     }
 
     std::vector<Descriptor> activeDescriptors;
@@ -373,19 +436,37 @@ void RegionSamplingThread::captureSample() {
     }
 
     ALOGV("Sampling %zu descriptors", activeDescriptors.size());
-    std::vector<float> lumas =
-            sampleBuffer(buffer->getBuffer(), sampledBounds.leftTop(), activeDescriptors);
-    if (lumas.size() != activeDescriptors.size()) {
-        ALOGW("collected %zu median luma values for %zu descriptors", lumas.size(),
-              activeDescriptors.size());
-        return;
+    // Each descriptor's luma, from the capture that holds its area
+    std::vector<float> lumas(activeDescriptors.size());
+    for (size_t c = 0; c < captureRects.size(); ++c) {
+        std::vector<size_t> indices;
+        std::vector<Descriptor> held;
+        for (size_t d = 0; d < activeDescriptors.size(); ++d) {
+            if (contains(captureRects[c], activeDescriptors[d].area)) {
+                indices.push_back(d);
+                held.push_back(activeDescriptors[d]);
+            }
+        }
+        if (held.empty()) {
+            continue;
+        }
+        const std::vector<float> heldLumas =
+                sampleBuffer(buffers[c]->getBuffer(), captureRects[c].leftTop(), held);
+        if (heldLumas.size() != held.size()) {
+            ALOGW("collected %zu median luma values for %zu descriptors", heldLumas.size(),
+                  held.size());
+            return;
+        }
+        for (size_t i = 0; i < indices.size(); ++i) {
+            lumas[indices[i]] = heldLumas[i];
+        }
     }
 
     for (size_t d = 0; d < activeDescriptors.size(); ++d) {
         activeDescriptors[d].listener->onSampleCollected(lumas[d]);
     }
 
-    mCachedBuffer = buffer;
+    mCachedBuffers = std::move(buffers);
     SFTRACE_INT(lumaSamplingStepTag, static_cast<int>(samplingStep::noWorkNeeded));
 }
 

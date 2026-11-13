@@ -121,8 +121,8 @@ private:
 
     std::mutex mSamplingMutex;
     std::unordered_map<wp<IBinder>, Descriptor, WpHash> mDescriptors GUARDED_BY(mSamplingMutex);
-    std::shared_ptr<renderengine::ExternalTexture> mCachedBuffer GUARDED_BY(mSamplingMutex) =
-            nullptr;
+    std::vector<std::shared_ptr<renderengine::ExternalTexture>> mCachedBuffers
+            GUARDED_BY(mSamplingMutex);
 };
 
 } // namespace android
