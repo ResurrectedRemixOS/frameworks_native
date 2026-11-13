@@ -67,14 +67,20 @@ public:
 
     RefreshRateOverlay(ConstructorTag, FpsRange, ftl::Flags<Features>);
 
+    // Called once as SurfaceFlinger starts: disarms the panel's test TE if a SurfaceFlinger that
+    // died while an overlay polled the panel left it armed (sys.sf.panel_te).
+    static void resetPanelTe();
+
 private:
     bool initCheck() const;
 
     // If the ro.surface_flinger.panel_refresh_rate_node sysprop names a readable
     // sysfs node reporting the panel's real self-refresh rate (e.g. an LTPO TE
     // counter), a poller thread owns the displayed number instead of the vsync
-    // rate reported by mode changes.
+    // rate reported by mode changes. While any overlay polls, sys.sf.panel_te is "1" so the
+    // device can arm the panel's test TE, which the node measures from; otherwise it's "0".
     void startPanelRefreshPoller();
+    void stopPanelRefreshPoller();
     void panelRefreshPollLoop(const std::string& nodePath);
     bool usesPanelRefreshRate() const { return mPanelPollThread.joinable(); }
 

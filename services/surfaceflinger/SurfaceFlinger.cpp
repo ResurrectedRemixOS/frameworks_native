@@ -160,6 +160,7 @@
 #include "MutexUtils.h"
 #include "PowerAdvisor/PowerAdvisor.h"
 #include "PowerAdvisor/Workload.h"
+#include "RefreshRateOverlay.h"
 #include "RegionSamplingThread.h"
 #include "RenderResourceCache.h"
 #include "Scheduler/EventThread.h"
@@ -998,6 +999,9 @@ void SurfaceFlinger::init() FTL_FAKE_GUARD(kMainThreadContext) {
     mAllowHwcForWFD = base::GetBoolProperty("vendor.display.vds_allow_hwc"s, false);
     mAllowHwcForVDS = mAllowHwcForWFD && base::GetBoolProperty("debug.sf.enable_hwc_vds"s, false);
     mFirstApiLevel = android::base::GetIntProperty("ro.product.first_api_level", 0);
+
+    // Before any refresh rate overlay can poll the panel
+    RefreshRateOverlay::resetPanelTe();
 
     // Process hotplug for displays connected at boot.
     LOG_ALWAYS_FATAL_IF(!configureLocked(),

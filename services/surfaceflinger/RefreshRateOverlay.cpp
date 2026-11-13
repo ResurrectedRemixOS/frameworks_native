@@ -19,6 +19,7 @@
 #include <fstream>
 
 #include <android-base/properties.h>
+#include <android-base/thread_annotations.h>
 
 #include <common/FlagManager.h>
 #include "Client.h"
@@ -28,6 +29,18 @@
 #include <SkSurface.h>
 
 namespace android {
+
+namespace {
+
+// While this is "1", the device's init arms the panel's test TE, which the polled node measures
+// from. It raises an interrupt on every refresh, so it's armed only while an overlay polls.
+constexpr const char* kPanelTeProperty = "sys.sf.panel_te";
+
+// Overlays polling the panel: one per display, and two for a moment while one replaces another.
+std::mutex gPanelPollersMutex;
+int gPanelPollers GUARDED_BY(gPanelPollersMutex) = 0;
+
+} // namespace
 
 auto RefreshRateOverlay::draw(int refreshRate, int renderFps, bool idle, SkColor color,
                               ui::Transform::RotationFlags rotation, ftl::Flags<Features> features)
@@ -188,14 +201,8 @@ RefreshRateOverlay::RefreshRateOverlay(ConstructorTag, FpsRange fpsRange,
 }
 
 RefreshRateOverlay::~RefreshRateOverlay() {
-    if (mPanelPollThread.joinable()) {
-        {
-            std::lock_guard lock(mPollMutex);
-            mPollStop = true;
-        }
-        mPollCondition.notify_all();
-        mPanelPollThread.join();
-    }
+    // Turning the overlay off destroys it too.
+    stopPanelRefreshPoller();
 
     for (const auto& pair : mBufferCache) {
         for (const sp<GraphicBuffer>& buffer : pair.second) {
@@ -300,7 +307,37 @@ void RefreshRateOverlay::startPanelRefreshPoller() {
             base::GetProperty("ro.surface_flinger.panel_refresh_rate_node", "");
     if (nodePath.empty()) return;
 
+    {
+        std::lock_guard lock(gPanelPollersMutex);
+        if (gPanelPollers++ == 0) {
+            base::SetProperty(kPanelTeProperty, "1");
+        }
+    }
     mPanelPollThread = std::thread([this, nodePath] { panelRefreshPollLoop(nodePath); });
+}
+
+void RefreshRateOverlay::stopPanelRefreshPoller() {
+    if (!mPanelPollThread.joinable()) return;
+
+    {
+        std::lock_guard lock(mPollMutex);
+        mPollStop = true;
+    }
+    mPollCondition.notify_all();
+    mPanelPollThread.join();
+
+    std::lock_guard lock(gPanelPollersMutex);
+    if (--gPanelPollers == 0) {
+        base::SetProperty(kPanelTeProperty, "0");
+    }
+}
+
+void RefreshRateOverlay::resetPanelTe() {
+    // Only when it was left "1": the sm8550 panel driver disables the irq once more for every 0
+    // written, while a 1 enables it only once, so a needless 0 would keep it off.
+    if (base::GetProperty(kPanelTeProperty, "") == "1") {
+        base::SetProperty(kPanelTeProperty, "0");
+    }
 }
 
 void RefreshRateOverlay::panelRefreshPollLoop(const std::string& nodePath) {
